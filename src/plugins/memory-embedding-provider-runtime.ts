@@ -8,6 +8,8 @@ import {
   listRegisteredMemoryEmbeddingProviders,
   type MemoryEmbeddingProviderAdapter,
 } from "./memory-embedding-providers.js";
+import { registerBuiltInMemoryEmbeddingProviders } from "../../plugin-sdk/memory-core-bundled-runtime.js";
+import { registerMemoryEmbeddingProvider } from "./memory-embedding-providers.js";
 
 export { listRegisteredMemoryEmbeddingProviders };
 
@@ -30,10 +32,24 @@ export function listMemoryEmbeddingProviders(
   return [...merged.values()];
 }
 
+// Ensure builtin providers are registered (including extensions like memory-core)
+let __memoryProvidersInitialized = false;
+
+function ensureMemoryProvidersInitialized() {
+  if (__memoryProvidersInitialized) return;
+  __memoryProvidersInitialized = true;
+
+  registerBuiltInMemoryEmbeddingProviders({
+    registerMemoryEmbeddingProvider,
+  });
+}
+
 export function getMemoryEmbeddingProvider(
   id: string,
   cfg?: OpenClawConfig,
 ): MemoryEmbeddingProviderAdapter | undefined {
+  ensureMemoryProvidersInitialized();
+
   const registered = getRegisteredMemoryEmbeddingProvider(id);
   if (registered) {
     return registered.adapter;
