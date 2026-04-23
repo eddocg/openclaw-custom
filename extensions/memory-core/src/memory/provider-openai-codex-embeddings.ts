@@ -31,9 +31,10 @@ export const openaiCodexEmbeddingProvider: MemoryEmbeddingProviderAdapter = {
       throw new Error("No openai-codex OAuth profile found");
     }
 
-    const creds = profiles[0]?.credentials;
+    const profileId = profiles[0];
+	const creds = profileId ? store.profiles[profileId] : undefined;
 
-    if (!creds?.access) {
+    if (creds?.type !== "oauth" || !creds.access) {
       throw new Error("Invalid OAuth credentials for openai-codex");
     }
 
