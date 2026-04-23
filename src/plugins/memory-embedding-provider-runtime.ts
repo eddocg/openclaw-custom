@@ -8,7 +8,7 @@ import {
   listRegisteredMemoryEmbeddingProviders,
   type MemoryEmbeddingProviderAdapter,
 } from "./memory-embedding-providers.js";
-import { registerBuiltInMemoryEmbeddingProviders } from "../../plugin-sdk/memory-core-bundled-runtime.js";
+import { registerBuiltInMemoryEmbeddingProviders } from "../plugin-sdk/memory-core-bundled-runtime.js";
 import { registerMemoryEmbeddingProvider } from "./memory-embedding-providers.js";
 
 export { listRegisteredMemoryEmbeddingProviders };
