@@ -1,7 +1,9 @@
 import type {
   MemoryEmbeddingProviderAdapter,
   MemoryEmbeddingProviderCreateOptions,
-} from "./memory-embedding-providers.js";
+} from "openclaw/plugin-sdk/memory-core-host-engine-embeddings";
+
+import { resolveRemoteAuth } from "openclaw/plugin-sdk/provider-env-vars";
 
 export const openaiCodexEmbeddingProvider: MemoryEmbeddingProviderAdapter = {
   id: "openai-codex",
@@ -13,21 +15,52 @@ export const openaiCodexEmbeddingProvider: MemoryEmbeddingProviderAdapter = {
   authProviderId: "openai-codex",
 
   async create(options: MemoryEmbeddingProviderCreateOptions) {
-    const provider = {
-      id: "openai-codex",
-      model: options.model,
+    const { config, model } = options;
 
-      async embedQuery(_text: string) {
-        throw new Error("openai-codex embeddings not implemented yet");
-      },
+    const auth = await resolveRemoteAuth({
+      providerId: "openai-codex",
+      config,
+    });
 
-      async embedBatch(_texts: string[]) {
-        throw new Error("openai-codex embeddings not implemented yet");
-      },
-    };
+    const baseUrl = auth.baseUrl ?? "https://api.openai.com/v1";
+
+    async function embed(texts: string[]): Promise<number[][]> {
+      const res = await fetch(`${baseUrl}/embeddings`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${auth.apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          input: texts,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`openai-codex embeddings failed: ${err}`);
+      }
+
+      const json = await res.json();
+
+      return json.data.map((d: any) => d.embedding);
+    }
 
     return {
-      provider,
+      provider: {
+        id: "openai-codex",
+        model,
+
+        async embedQuery(text: string) {
+          const [vec] = await embed([text]);
+          return vec;
+        },
+
+        async embedBatch(texts: string[]) {
+          return embed(texts);
+        },
+      },
     };
   },
 };
