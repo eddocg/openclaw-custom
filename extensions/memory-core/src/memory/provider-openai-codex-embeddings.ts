@@ -33,11 +33,11 @@ export const openaiCodexEmbeddingProvider: MemoryEmbeddingProviderAdapter = {
 
     const creds = profiles[0]?.credentials;
 
-    if (!creds?.accessToken) {
+    if (!creds?.access) {
       throw new Error("Invalid OAuth credentials for openai-codex");
     }
 
-    const token = creds.accessToken;
+    const token = creds.access;
 
     async function embed(texts: string[]): Promise<number[][]> {
       const res = await fetch("https://api.openai.com/v1/embeddings", {
