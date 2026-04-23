@@ -79,6 +79,7 @@ import {
   DISCORD_ATTACHMENT_TOTAL_TIMEOUT_MS,
 } from "./timeouts.js";
 import { sendTyping } from "./typing.js";
+import { spawn } from "node:child_process";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -103,6 +104,52 @@ type DiscordMessageProcessObserver = {
   onFinalReplyDelivered?: () => void;
   onReplyPlanResolved?: (params: { createdThreadId?: string; sessionKey?: string }) => void;
 };
+
+function persistDiscordPrompt(prompt: string): void {
+  const trimmed = prompt.trim();
+  if (!trimmed) {
+    return;
+  }
+
+  try {
+    const child = spawn(
+      process.env.OPENCLAW_MEMORY_CORE_PYTHON_BIN || "python3",
+      [
+        "-m",
+        "openclaw_memory_core.integration.agent_run_cli",
+        "--openclaw-bin",
+        "openclaw",
+        "--title",
+        "discord-run",
+        "--domain",
+        "openclaw",
+        "--prompt",
+        trimmed,
+      ],
+      {
+        env: {
+          ...process.env,
+          OPENCLAW_MEMORY_CORE_DSN: process.env.OPENCLAW_MEMORY_CORE_DSN,
+        },
+        detached: true,
+        stdio: "ignore",
+      },
+    );
+
+    child.unref();
+  } catch (error) {
+    runtimeSafeLogError("discord memory persistence spawn failed", error);
+  }
+}
+
+function runtimeSafeLogError(message: string, error: unknown): void {
+  try {
+    // eslint-disable-next-line no-console
+    console.error(message, error);
+  } catch {
+    // ignore
+  }
+}
 
 export async function processDiscordMessage(
   ctx: DiscordMessagePreflightContext,
@@ -159,6 +206,8 @@ export async function processDiscordMessage(
     return;
   }
 
+
+  
   const ssrfPolicy = cfg.browser?.ssrfPolicy;
   const mediaResolveOptions = {
     fetchImpl: discordRestFetch,
@@ -185,6 +234,8 @@ export async function processDiscordMessage(
     logVerbose("discord: drop message " + message.id + " (empty content)");
     return;
   }
+  
+  persistDiscordPrompt(text);
 
   const boundThreadId = ctx.threadBinding?.conversation?.conversationId?.trim();
   if (boundThreadId && typeof threadBindings.touchThread === "function") {
