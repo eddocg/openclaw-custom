@@ -10,6 +10,7 @@ import { resolveUserPath } from "openclaw/plugin-sdk/memory-core-host-engine-fou
 import { getProviderEnvVars } from "openclaw/plugin-sdk/provider-env-vars";
 import { formatErrorMessage } from "../dreaming-shared.js";
 import { filterUnregisteredMemoryEmbeddingProviderAdapters } from "./provider-adapter-registration.js";
+import { openaiCodexEmbeddingProvider } from "../../../src/plugins/provider-openai-codex-embeddings.js";
 
 export type BuiltinMemoryEmbeddingProviderDoctorMetadata = {
   providerId: string;
@@ -106,7 +107,11 @@ const localAdapter: MemoryEmbeddingProviderAdapter = {
   },
 };
 
-export const builtinMemoryEmbeddingProviderAdapters = [localAdapter] as const;
+//export const builtinMemoryEmbeddingProviderAdapters = [localAdapter] as const;
+export const builtinMemoryEmbeddingProviderAdapters = [
+  localAdapter,
+  openaiCodexEmbeddingProvider,
+] as const;
 
 export { DEFAULT_LOCAL_MODEL };
 
