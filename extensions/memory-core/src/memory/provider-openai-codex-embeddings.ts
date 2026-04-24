@@ -40,28 +40,48 @@ export const openaiCodexEmbeddingProvider: MemoryEmbeddingProviderAdapter = {
 
     const token = creds.access;
 
-    async function embed(texts: string[]): Promise<number[][]> {
-      const res = await fetch("https://api.openai.com/v1/embeddings", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+async function embed(texts: string[]): Promise<number[][]> {
+  const results: number[][] = [];
+
+  for (const text of texts) {
+    const res = await fetch("http://127.0.0.1:18789/__openclaw__/capability", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        capability: "model.run",
+        input: {
+          model: "openai-codex/gpt-5.4",
+          messages: [
+            {
+              role: "system",
+              content:
+                "Convert the following text into a dense numeric embedding vector (array of floats). Only return JSON array.",
+            },
+            {
+              role: "user",
+              content: text,
+            },
+          ],
         },
-        body: JSON.stringify({
-          model,
-          input: texts,
-        }),
-      });
+      }),
+    });
 
-      if (!res.ok) {
-        const err = await res.text();
-        throw new Error(`openai-codex embeddings failed: ${err}`);
-      }
+    const json = await res.json();
 
-      const json = await res.json();
+    const content = json?.output?.[0]?.content?.[0]?.text;
 
-      return json.data.map((d: any) => d.embedding);
+    try {
+      const vector = JSON.parse(content);
+      results.push(vector);
+    } catch {
+      throw new Error("Failed to parse embedding from model output");
     }
+  }
+
+  return results;
+}
 
     return {
       provider: {
