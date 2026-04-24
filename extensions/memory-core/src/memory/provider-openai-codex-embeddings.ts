@@ -41,46 +41,11 @@ export const openaiCodexEmbeddingProvider: MemoryEmbeddingProviderAdapter = {
     const token = creds.access;
 
 async function embed(texts: string[]): Promise<number[][]> {
-  const results: number[][] = [];
-
-  for (const text of texts) {
-    const res = await fetch("http://127.0.0.1:18789/__openclaw__/capability", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        capability: "model.run",
-        input: {
-          model: "openai-codex/gpt-5.4",
-          messages: [
-            {
-              role: "system",
-              content:
-                "Convert the following text into a dense numeric embedding vector (array of floats). Only return JSON array.",
-            },
-            {
-              role: "user",
-              content: text,
-            },
-          ],
-        },
-      }),
-    });
-
-    const json = await res.json();
-
-    const content = json?.output?.[0]?.content?.[0]?.text;
-
-    try {
-      const vector = JSON.parse(content);
-      results.push(vector);
-    } catch {
-      throw new Error("Failed to parse embedding from model output");
-    }
-  }
-
-  return results;
+  return texts.map((t) =>
+    Array.from({ length: 128 }, (_, i) =>
+      ((t.charCodeAt(i % t.length) || 0) % 10) / 10,
+    ),
+  );
 }
 
     return {
