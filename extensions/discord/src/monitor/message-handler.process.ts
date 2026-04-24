@@ -79,7 +79,7 @@ import {
   DISCORD_ATTACHMENT_TOTAL_TIMEOUT_MS,
 } from "./timeouts.js";
 import { sendTyping } from "./typing.js";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -141,6 +141,48 @@ function persistDiscordPrompt(prompt: string): void {
     runtimeSafeLogError("discord memory persistence spawn failed", error);
   }
 }
+
+function resolveSemanticMemoryContext(prompt: string): string {
+  const trimmed = prompt.trim();
+  const dsn = process.env.OPENCLAW_MEMORY_CORE_DSN?.trim();
+  if (!trimmed || !dsn) {
+    return "";
+  }
+
+  const pythonBin = process.env.OPENCLAW_MEMORY_CORE_PYTHON_BIN || "python3";
+
+  const script = `
+import os
+import sys
+from openclaw_memory_core.integration.service import RuntimeContextService
+from openclaw_memory_core.integration.request import ContextRequest
+from openclaw_memory_core.stores.postgres_retrieval import PostgresEpisodicRetrieval
+
+retrieval = PostgresEpisodicRetrieval(os.environ["OPENCLAW_MEMORY_CORE_DSN"])
+service = RuntimeContextService(retrieval)
+print(service.build(ContextRequest(query=sys.argv[1])))
+`;
+
+  try {
+    const result = spawnSync(pythonBin, ["-c", script, trimmed], {
+      env: {
+        ...process.env,
+        OPENCLAW_MEMORY_CORE_DSN: dsn,
+      },
+      encoding: "utf-8",
+      timeout: 3000,
+    });
+
+    if (result.status !== 0) {
+      return "";
+    }
+
+    return result.stdout.trim();
+  } catch {
+    return "";
+  }
+}
+
 
 function runtimeSafeLogError(message: string, error: unknown): void {
   try {
@@ -236,6 +278,8 @@ export async function processDiscordMessage(
   }
   
   persistDiscordPrompt(text);
+  
+  const semanticMemoryContext = resolveSemanticMemoryContext(text);
 
   const boundThreadId = ctx.threadBinding?.conversation?.conversationId?.trim();
   if (boundThreadId && typeof threadBindings.touchThread === "function") {
@@ -521,9 +565,14 @@ export async function processDiscordMessage(
 
   const originatingTo = autoThreadContext?.OriginatingTo ?? dmConversationTarget ?? replyTarget;
 
+  const bodyForAgent =
+  semanticMemoryContext
+    ? `Relevant memory:\n${semanticMemoryContext}\n\nUser request:\n${baseText ?? text}`
+    : (baseText ?? text);
+
   const ctxPayload = finalizeInboundContext({
     Body: combinedBody,
-    BodyForAgent: baseText ?? text,
+    BodyForAgent: bodyForAgent,
     InboundHistory: inboundHistory,
     RawBody: baseText,
     CommandBody: baseText,
