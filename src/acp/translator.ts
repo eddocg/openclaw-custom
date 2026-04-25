@@ -46,6 +46,10 @@ import {
   formatToolTitle,
   inferToolKind,
 } from "./event-mapper.js";
+import {
+  createMemoryContextAdapter,
+  type MemoryContextAdapter,
+} from "../memory/memory-context-adapter.js";
 import { readBool, readNumber, readString } from "./meta.js";
 import { parseSessionMeta, resetSessionIfNeeded, resolveSessionKey } from "./session-mapper.js";
 import { defaultAcpSessionStore, type AcpSessionStore } from "./session.js";
@@ -92,6 +96,7 @@ type PendingToolCall = {
 
 type AcpGatewayAgentOptions = AcpServerOptions & {
   sessionStore?: AcpSessionStore;
+  memoryAdapter?: MemoryContextAdapter;
 };
 
 type GatewaySessionPresentationRow = Pick<
@@ -423,6 +428,7 @@ export class AcpGatewayAgent implements Agent {
   private opts: AcpGatewayAgentOptions;
   private log: (msg: string) => void;
   private sessionStore: AcpSessionStore;
+  private memoryAdapter: MemoryContextAdapter;
   private sessionCreateRateLimiter: FixedWindowRateLimiter;
   private pendingPrompts = new Map<string, PendingPrompt>();
   private disconnectTimer: NodeJS.Timeout | null = null;
@@ -447,6 +453,11 @@ export class AcpGatewayAgent implements Agent {
     this.opts = opts;
     this.log = opts.verbose ? (msg: string) => process.stderr.write(`[acp] ${msg}\n`) : () => {};
     this.sessionStore = opts.sessionStore ?? defaultAcpSessionStore;
+    this.memoryAdapter =
+      opts.memoryAdapter ??
+      createMemoryContextAdapter({
+        log: (msg: string) => process.stderr.write(`[acp][memory] ${msg}\n`),
+      });
     this.sessionCreateRateLimiter = createFixedWindowRateLimiter({
       maxRequests: Math.max(
         1,
@@ -688,7 +699,13 @@ export class AcpGatewayAgent implements Agent {
     const attachments = extractAttachmentsFromPrompt(params.prompt);
     const prefixCwd = meta.prefixCwd ?? this.opts.prefixCwd ?? true;
     const displayCwd = shortenHomePath(session.cwd);
-    const message = prefixCwd ? `[Working directory: ${displayCwd}]\n\n${userText}` : userText;
+    const cwdPrefix = prefixCwd ? `[Working directory: ${displayCwd}]\n\n` : "";
+    // Memory adapter is fail-open by default. Strict-mode failures will throw
+    // and propagate as a normal prompt error.
+    const memoryBlock = await this.memoryAdapter.resolveContext(userText);
+    const message = memoryBlock
+      ? `${cwdPrefix}<memory_context>\n${memoryBlock}\n</memory_context>\n\n<user_request>\n${userText}\n</user_request>`
+      : `${cwdPrefix}${userText}`;
     const provenanceMode = this.opts.provenanceMode ?? "off";
     const systemInputProvenance =
       provenanceMode === "off" ? undefined : buildSystemInputProvenance(params.sessionId);
