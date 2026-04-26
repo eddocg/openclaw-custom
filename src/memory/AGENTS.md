@@ -56,6 +56,18 @@ Ingest (`memory-ingest-adapter.ts`) reads:
 | `OPENCLAW_MEMORY_STRICT`             | `false`   | Shared. If `true`, surface CLI failures as thrown errors during the grace window. |
 | `OPENCLAW_MEMORY_DEBUG`              | `false`   | Shared. If `true`, the ingest adapter and both ingest seams emit `[memory-ingest]` breadcrumbs at INFO so they land in the gateway log file at the default file log level (see "Debug observability" below). Read once per call from `process.env`; restart the gateway after toggling. |
 
+Canonical memory (`memory-context-injection.ts`, `loadCanonicalMemory`) reads:
+
+| Env var                              | Default                                | Purpose                                                                                         |
+| ------------------------------------ | -------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `OPENCLAW_CANONICAL_MEMORY_PATH`     | `$HOME/.openclaw/workspace/MEMORY.md`  | Path to the operator-authored canonical memory file. Whitespace-only values are treated as unset and fall back to the default. |
+| `OPENCLAW_CANONICAL_MEMORY_MAX_CHARS`| `16384`                                | Defensive cap on the trimmed canonical body. Garbage values fall back to the default; oversize content is truncated and a size-only `[memory-context] canonical truncated bytes=… cap=…` log is emitted. |
+
+Canonical injection is gated by file presence, not `OPENCLAW_MEMORY_ENABLED`.
+The semantic master switch keeps gating the retrieval CLI only. The loader is
+fail-open: a missing, unreadable, empty, or whitespace-only file returns `""`
+and the injector skips the canonical block without aborting the turn.
+
 All other knobs (DSN, embedding engine, device, etc.) belong to memory-core.
 
 ## Behavior
@@ -76,12 +88,33 @@ All other knobs (DSN, embedding engine, device, etc.) belong to memory-core.
   open tag is followed by a matching close tag inside the first 32 KiB of the
   prompt. Used for idempotence so existing wraps (already-wrapped retries,
   manually authored test prompts, etc.) pass through untouched.
+- `loadCanonicalMemory({ env?, readFileSync?, homedir?, log? })`: resolves
+  `OPENCLAW_CANONICAL_MEMORY_PATH` (or the default
+  `$HOME/.openclaw/workspace/MEMORY.md`), reads the file, trims, applies
+  the `OPENCLAW_CANONICAL_MEMORY_MAX_CHARS` cap, and returns the resulting
+  string. All failures (missing/unreadable file, decode error, empty body)
+  return `""` and never throw. Logs are size/reason-only and never include
+  the canonical body.
+- `composeMemoryBlock({ canonical, semantic })`: builds the inner block
+  placed inside `<memory_context>`. Canonical always renders before
+  semantic; each non-empty source is wrapped in its own labeled tag and
+  the two tags (when both present) are separated by a blank line. If both
+  sources are empty the function returns `""` so the caller can skip the
+  outer envelope entirely.
 - `wrapPromptWithMemoryContext(promptToWrap, memoryBlock)`: emits the exact
-  envelope verbatim:
+  envelope verbatim. The single-string `memoryBlock` argument is preserved
+  for backwards compatibility; production callers compose the labeled inner
+  block via `composeMemoryBlock` first:
 
   ```
   <memory_context>
-  {memoryBlock}
+  <canonical_memory>
+  {canonical}
+  </canonical_memory>
+
+  <semantic_memory>
+  {semantic}
+  </semantic_memory>
   </memory_context>
 
   <user_request>
@@ -89,15 +122,25 @@ All other knobs (DSN, embedding engine, device, etc.) belong to memory-core.
   </user_request>
   ```
 
-- `createMemoryContextInjector({ adapter?, log? })`: returns
-  `{ inject({ promptToWrap, query }) }`. The injector resolves the memory
-  block by calling the adapter with `query` and wraps `promptToWrap` only
-  when:
-    1. `query` is non-empty after trim,
-    2. `promptToWrap` is not already wrapped,
-    3. the adapter returns a non-empty block.
-  Otherwise the injector returns `promptToWrap` unchanged. `MemoryContextError`
-  bubbles out of `inject` so callers can honor strict-mode behavior.
+  When only one source is present the corresponding sub-tag is omitted; the
+  outer `<memory_context>` / `<user_request>` envelope is unchanged either
+  way so `isPromptAlreadyWrapped` continues to detect prior wraps.
+
+- `createMemoryContextInjector({ adapter?, log?, canonical? })`: returns
+  `{ inject({ promptToWrap, query }) }`. `canonical` is an optional
+  `() => string` test seam; the default closes over `loadCanonicalMemory`
+  bound to the live env / fs / `log`. The injector wraps `promptToWrap`
+  only when:
+    1. `promptToWrap` is not already wrapped,
+    2. `composeMemoryBlock({ canonical, semantic })` is non-empty.
+
+  The semantic adapter is consulted only when `query` is non-empty after
+  trim; canonical memory is loaded on every non-passthrough turn and can
+  trigger a wrap on its own (e.g. when the query is empty or semantic
+  retrieval is disabled / returns empty). Otherwise the injector returns
+  `promptToWrap` unchanged. `MemoryContextError` from the semantic adapter
+  bubbles out of `inject` so callers can honor strict-mode behavior;
+  canonical loader failures are always swallowed.
 
 `promptToWrap` and `query` are intentionally separate arguments so callers
 can submit a fully composed prompt (e.g. the embedded runner's
