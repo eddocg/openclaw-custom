@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { SessionAcpMeta } from "../../config/sessions/types.js";
 import type { MemoryContextAdapter } from "../../memory/memory-context-adapter.js";
@@ -6,6 +6,7 @@ import { createMemoryContextInjector } from "../../memory/memory-context-injecti
 import {
   MemoryIngestError,
   type MemoryIngestAdapter,
+  type MemoryIngestResult,
 } from "../../memory/memory-ingest-adapter.js";
 import type { AcpRuntime, AcpRuntimeCapabilities } from "../runtime/types.js";
 
@@ -15,7 +16,16 @@ const hoisted = vi.hoisted(() => ({
   upsertAcpSessionMetaMock: vi.fn(),
   getAcpRuntimeBackendMock: vi.fn(),
   requireAcpRuntimeBackendMock: vi.fn(),
+  logVerboseMock: vi.fn(),
 }));
+
+vi.mock("../../globals.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../globals.js")>();
+  return {
+    ...original,
+    logVerbose: (msg: string) => hoisted.logVerboseMock(msg),
+  };
+});
 
 vi.mock("../runtime/session-meta.js", () => ({
   listAcpSessionEntries: (params: unknown) => hoisted.listAcpSessionEntriesMock(params),
@@ -118,6 +128,12 @@ describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
         return null;
       }
     });
+    hoisted.logVerboseMock.mockReset();
+    delete process.env.OPENCLAW_MEMORY_DEBUG;
+  });
+
+  afterEach(() => {
+    delete process.env.OPENCLAW_MEMORY_DEBUG;
   });
 
   it("calls memoryIngester.ingest with the raw input.text once per turn", async () => {
@@ -125,7 +141,7 @@ describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
     bindRuntime(runtime);
 
     const memoryIngester: MemoryIngestAdapter = {
-      ingest: vi.fn(async () => ({ status: "skipped:no_trigger" })),
+      ingest: vi.fn(async (): Promise<MemoryIngestResult> => ({ status: "skipped:no_trigger" })),
     };
 
     const manager = new AcpSessionManager({
@@ -153,7 +169,7 @@ describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
 
     const callOrder: string[] = [];
     const memoryIngester: MemoryIngestAdapter = {
-      ingest: vi.fn(async () => {
+      ingest: vi.fn(async (): Promise<MemoryIngestResult> => {
         callOrder.push("ingest");
         return { status: "succeeded", content: "ORANGE FALCON" };
       }),
@@ -185,7 +201,12 @@ describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
     bindRuntime(runtime);
 
     const memoryIngester: MemoryIngestAdapter = {
-      ingest: vi.fn(async () => ({ status: "succeeded", content: "ORANGE FALCON" })),
+      ingest: vi.fn(
+        async (): Promise<MemoryIngestResult> => ({
+          status: "succeeded",
+          content: "ORANGE FALCON",
+        }),
+      ),
     };
 
     const manager = new AcpSessionManager({
@@ -243,7 +264,7 @@ describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
     bindRuntime(runtime);
 
     const memoryIngester: MemoryIngestAdapter = {
-      ingest: vi.fn(async (rawText: string) => {
+      ingest: vi.fn(async (rawText: string): Promise<MemoryIngestResult> => {
         if (rawText.includes("<memory_context>") || rawText.includes("<user_request>")) {
           return { status: "skipped:wrapped" };
         }
@@ -269,9 +290,78 @@ describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
 
     expect(memoryIngester.ingest).toHaveBeenCalledTimes(1);
     expect(memoryIngester.ingest).toHaveBeenCalledWith(wrapped);
-    const result = await (memoryIngester.ingest as ReturnType<typeof vi.fn>).mock.results[0]
-      ?.value;
+    const result = await (memoryIngester.ingest as ReturnType<typeof vi.fn>).mock.results[0]?.value;
     expect(result?.status).toBe("skipped:wrapped");
     expect(runTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("emits seam-start and seam-result logVerbose lines when OPENCLAW_MEMORY_DEBUG=true", async () => {
+    process.env.OPENCLAW_MEMORY_DEBUG = "true";
+
+    const { runtime, runTurn } = createRuntime();
+    bindRuntime(runtime);
+
+    const memoryIngester: MemoryIngestAdapter = {
+      ingest: vi.fn(
+        async (): Promise<MemoryIngestResult> => ({
+          status: "succeeded",
+          reason: "ok",
+          content: "alpha",
+        }),
+      ),
+    };
+
+    const manager = new AcpSessionManager({
+      ...DEFAULT_DEPS,
+      memoryInjector: makeStubInjector(),
+      memoryIngester,
+    });
+
+    await manager.runTurn({
+      cfg: baseCfg,
+      sessionKey: SESSION_KEY,
+      text: "Save this: alpha",
+      mode: "prompt",
+      requestId: "r-ing-debug",
+    });
+
+    expect(memoryIngester.ingest).toHaveBeenCalledTimes(1);
+    expect(runTurn).toHaveBeenCalledTimes(1);
+
+    const calls = hoisted.logVerboseMock.mock.calls.map(([msg]) => String(msg));
+    expect(calls.some((m) => /seam=acp-manager ingest-start/.test(m))).toBe(true);
+    expect(calls.some((m) => /seam=acp-manager ingest-result status=succeeded/.test(m))).toBe(true);
+    // Reason must be present (either "ok" or "none"), but we do not assert
+    // the full reason content to avoid overfitting.
+    expect(calls.some((m) => /reason=/.test(m))).toBe(true);
+  });
+
+  it("emits no [memory-ingest] seam markers when OPENCLAW_MEMORY_DEBUG is unset", async () => {
+    const { runtime, runTurn } = createRuntime();
+    bindRuntime(runtime);
+
+    const memoryIngester: MemoryIngestAdapter = {
+      ingest: vi.fn(async (): Promise<MemoryIngestResult> => ({ status: "skipped:no_trigger" })),
+    };
+
+    const manager = new AcpSessionManager({
+      ...DEFAULT_DEPS,
+      memoryInjector: makeStubInjector(),
+      memoryIngester,
+    });
+
+    await manager.runTurn({
+      cfg: baseCfg,
+      sessionKey: SESSION_KEY,
+      text: "what is the bot ingestion phrase?",
+      mode: "prompt",
+      requestId: "r-ing-no-debug",
+    });
+
+    expect(memoryIngester.ingest).toHaveBeenCalledTimes(1);
+    expect(runTurn).toHaveBeenCalledTimes(1);
+
+    const calls = hoisted.logVerboseMock.mock.calls.map(([msg]) => String(msg));
+    expect(calls.some((m) => /\[memory-ingest\] seam=acp-manager/.test(m))).toBe(false);
   });
 });

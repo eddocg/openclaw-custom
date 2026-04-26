@@ -152,6 +152,15 @@ type BackgroundTaskContext = {
   task: string;
 };
 
+function isAcpMemoryDebugEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.OPENCLAW_MEMORY_DEBUG;
+  if (typeof raw !== "string") {
+    return false;
+  }
+  const lower = raw.trim().toLowerCase();
+  return lower === "true" || lower === "1" || lower === "yes" || lower === "on";
+}
+
 export class AcpSessionManager {
   private readonly actorQueue = new SessionActorQueue();
   private readonly actorTailBySession = this.actorQueue.getTailMapForTesting();
@@ -727,7 +736,16 @@ export class AcpSessionManager {
         // /save this" trigger. The hybrid grace+detach contract bounds the
         // awaited delay; pre-wrapped prompts skip ingest to avoid
         // double-ingest on retries.
-        await this.deps.memoryIngester.ingest(input.text);
+        const memoryIngestDebug = isAcpMemoryDebugEnabled(process.env);
+        if (memoryIngestDebug) {
+          logVerbose("[memory-ingest] seam=acp-manager ingest-start");
+        }
+        const memoryIngestResult = await this.deps.memoryIngester.ingest(input.text);
+        if (memoryIngestDebug) {
+          logVerbose(
+            `[memory-ingest] seam=acp-manager ingest-result status=${memoryIngestResult.status} reason=${memoryIngestResult.reason ?? "none"}`,
+          );
+        }
         // Apply the shared memory-context envelope to the runtime-bound text.
         // The background task summary above keeps using raw `input.text` so
         // operator-visible task titles do not leak retrieved memory blocks.

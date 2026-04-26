@@ -54,6 +54,7 @@ Ingest (`memory-ingest-adapter.ts`) reads:
 | `OPENCLAW_MEMORY_INGEST_TIMEOUT_MS`  | `30000`   | Hard subprocess timeout (ms). Larger than retrieval because the ingest CLI loads the embedding model and writes the row. |
 | `OPENCLAW_MEMORY_INGEST_GRACE_MS`    | `500`     | Awaited window before the call site detaches and continues without blocking the turn. Clamped to `<= timeout`. |
 | `OPENCLAW_MEMORY_STRICT`             | `false`   | Shared. If `true`, surface CLI failures as thrown errors during the grace window. |
+| `OPENCLAW_MEMORY_DEBUG`              | `false`   | Shared. If `true`, the ingest adapter and both ingest seams emit `[memory-ingest]` breadcrumbs through the injected `log` callback (or `log.debug` / `logVerbose` at the seams). Read once per call from `process.env`; restart the gateway after toggling. |
 
 All other knobs (DSN, embedding engine, device, etc.) belong to memory-core.
 
@@ -208,8 +209,35 @@ injector. Each seam takes the raw user text:
   background-task summary, the runtime call, and the ingest call.
 
 `AcpSessionManager` accepts the ingester via `AcpSessionManagerDeps`; the
-default ships in `manager.types.ts` (`createMemoryIngestAdapter()`) and is
-overridable in tests.
+default ships in `manager.types.ts` (`createMemoryIngestAdapter({ log: ... })`)
+and is overridable in tests. The default `log` bridges adapter messages to
+`logVerbose` so its `[memory-ingest]` breadcrumbs land in the same stream as
+the seam markers below.
+
+### Debug observability
+
+When `OPENCLAW_MEMORY_DEBUG=true`:
+
+- The ingest adapter emits `[memory-ingest]` breadcrumbs at every state
+  transition (call entry, every skip status, trigger match, subprocess start,
+  spawned PID, grace-expiry detach, child close with code/signal previews,
+  and the final status / reason / spawned). Logs go through the injected
+  `log` callback. Embedded runner uses `log.debug`; ACP runtime uses
+  `logVerbose`.
+- Each seam also emits two short markers for unambiguous attribution:
+  - Embedded runner: `[memory-ingest] seam=embedded-attempt ingest-start` /
+    `seam=embedded-attempt ingest-result status=<status> reason=<reason-or-none>`.
+  - ACP runtime: `[memory-ingest] seam=acp-manager ingest-start` /
+    `seam=acp-manager ingest-result status=<status> reason=<reason-or-none>`.
+- All previews are passed through `previewText(...)`: whitespace is
+  collapsed, the result is trimmed, and inputs are capped at 300 chars with
+  a trailing ellipsis. The configured Python interpreter is logged as just
+  the basename when it looks path-like, never the full absolute path. Model
+  paths, env values, DSNs, tokens, and `--content` payloads are never
+  logged.
+- The flag is read from `process.env` per call. Toggling it without
+  restarting the gateway is not supported; restart the gateway after
+  changing the env var.
 
 ## Guards / Regression tests
 

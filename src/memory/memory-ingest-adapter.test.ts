@@ -1,5 +1,5 @@
-import { EventEmitter } from "node:events";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   containsForbiddenSubstring,
@@ -7,6 +7,7 @@ import {
   extractContent,
   matchTrigger,
   MemoryIngestError,
+  previewText,
   type MemoryIngestAdapterDeps,
   type SpawnFn,
 } from "./memory-ingest-adapter.js";
@@ -99,9 +100,7 @@ describe("matchTrigger", () => {
     expect(matchTrigger("remember this as semantic memory: foo")).toBe(
       "remember this as semantic memory",
     );
-    expect(matchTrigger("Save this as Semantic Memory: bar")).toBe(
-      "save this as semantic memory",
-    );
+    expect(matchTrigger("Save this as Semantic Memory: bar")).toBe("save this as semantic memory");
     expect(matchTrigger("REMEMBER THIS: value")).toBe("remember this");
     expect(matchTrigger("save this :: value")).toBe("save this");
   });
@@ -135,9 +134,9 @@ describe("extractContent", () => {
   });
 
   it("preserves only the first split when multiple colons are present", () => {
-    expect(
-      extractContent("Remember this: alpha: beta: gamma", "remember this"),
-    ).toBe("alpha: beta: gamma");
+    expect(extractContent("Remember this: alpha: beta: gamma", "remember this")).toBe(
+      "alpha: beta: gamma",
+    );
   });
 });
 
@@ -216,9 +215,7 @@ describe("createMemoryIngestAdapter", () => {
     };
     const { adapter } = makeAdapter(env, spawn.spawn);
 
-    const promise = adapter.ingest(
-      "Remember this as semantic memory: ORANGE FALCON 246.",
-    );
+    const promise = adapter.ingest("Remember this as semantic memory: ORANGE FALCON 246.");
 
     await vi.advanceTimersByTimeAsync(0);
     expect(spawn.calls).toHaveLength(1);
@@ -351,7 +348,9 @@ describe("createMemoryIngestAdapter", () => {
     expect(spawn.childRef.value.killed).toBe(false);
 
     spawn.childRef.value.emitClose(0);
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("memory ingest finished after detach"));
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("memory ingest finished after detach"),
+    );
   });
 
   it("kills the child with SIGTERM when the full timeout elapses after detach", async () => {
@@ -392,7 +391,9 @@ describe("createMemoryIngestAdapter", () => {
     expect(result.status).toBe("detached");
 
     spawn.childRef.value.emitClose(2);
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("memory ingest finished after detach"));
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("memory ingest finished after detach"),
+    );
   });
 
   it("catches synchronous spawn throws and fails open", async () => {
@@ -484,6 +485,187 @@ describe("createMemoryIngestAdapter", () => {
     const passedContent = spawn.calls[0]?.args[5] ?? "";
     expect(passedContent.length).toBe(16_000);
     expect(passedContent).toBe("x".repeat(16_000));
+    spawn.childRef.value.emitClose(0);
+    await promise;
+  });
+});
+
+describe("previewText", () => {
+  it("returns empty string for empty/non-string inputs", () => {
+    expect(previewText("", 100)).toBe("");
+    expect(previewText("hello", 0)).toBe("");
+  });
+
+  it("collapses internal whitespace and trims", () => {
+    expect(previewText("  hello   world\n  again  ", 100)).toBe("hello world again");
+  });
+
+  it("caps to maxChars and appends ellipsis", () => {
+    const long = "abcdefghij".repeat(40);
+    const out = previewText(long, 50);
+    expect(out.length).toBe(53);
+    expect(out.endsWith("...")).toBe(true);
+  });
+
+  it("does not append ellipsis if input fits", () => {
+    expect(previewText("short", 50)).toBe("short");
+  });
+});
+
+describe("debug logging (OPENCLAW_MEMORY_DEBUG=true)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const DEBUG_ENV: NodeJS.ProcessEnv = {
+    ...ENABLED_ENV,
+    OPENCLAW_MEMORY_DEBUG: "true",
+  };
+
+  it("emits no debug logs and does not spawn when memory is disabled", async () => {
+    const spawn = buildSpawn();
+    const log = vi.fn();
+    // Disabled: only OPENCLAW_MEMORY_DEBUG is on.
+    const { adapter } = makeAdapter({ OPENCLAW_MEMORY_DEBUG: "true" }, spawn.spawn, log);
+
+    const result = await adapter.ingest("Remember this: foo");
+    expect(result.status).toBe("skipped:disabled");
+    expect(spawn.calls).toHaveLength(0);
+    expect(
+      log.mock.calls.some(([msg]) => /status=skipped:disabled .*spawned=false/.test(String(msg))),
+    ).toBe(true);
+  });
+
+  it("emits debug logs and does not spawn for no-trigger input", async () => {
+    const spawn = buildSpawn();
+    const log = vi.fn();
+    const { adapter } = makeAdapter(DEBUG_ENV, spawn.spawn, log);
+
+    const result = await adapter.ingest("hello there");
+    expect(result.status).toBe("skipped:no_trigger");
+    expect(spawn.calls).toHaveLength(0);
+    expect(
+      log.mock.calls.some(([msg]) => /status=skipped:no_trigger .*spawned=false/.test(String(msg))),
+    ).toBe(true);
+  });
+
+  it("emits debug logs and does not spawn for already-wrapped input", async () => {
+    const spawn = buildSpawn();
+    const log = vi.fn();
+    const { adapter } = makeAdapter(DEBUG_ENV, spawn.spawn, log);
+
+    const result = await adapter.ingest(
+      "<memory_context>\nprior\n</memory_context>\n\n<user_request>\nremember this: foo\n</user_request>",
+    );
+    expect(result.status).toBe("skipped:wrapped");
+    expect(spawn.calls).toHaveLength(0);
+    expect(
+      log.mock.calls.some(([msg]) => /status=skipped:wrapped .*spawned=false/.test(String(msg))),
+    ).toBe(true);
+  });
+
+  it("emits a final debug log with status, reason, and spawned=true on a successful spawn", async () => {
+    const spawn = buildSpawn();
+    const log = vi.fn();
+    const { adapter } = makeAdapter(DEBUG_ENV, spawn.spawn, log);
+
+    const promise = adapter.ingest("Remember this as semantic memory: ORANGE FALCON 246");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(spawn.calls).toHaveLength(1);
+
+    spawn.childRef.value.emitStdout("ok\n");
+    spawn.childRef.value.emitClose(0);
+    const result = await promise;
+    expect(result.status).toBe("succeeded");
+
+    // Stable guarantees only:
+    expect(log.mock.calls.some(([msg]) => /status=succeeded /.test(String(msg)))).toBe(true);
+    expect(log.mock.calls.some(([msg]) => /spawned=true/.test(String(msg)))).toBe(true);
+  });
+
+  it("emits debug logs surrounding a non-zero exit (status=failed) and still fails open", async () => {
+    const spawn = buildSpawn();
+    const log = vi.fn();
+    const { adapter } = makeAdapter(DEBUG_ENV, spawn.spawn, log);
+
+    const promise = adapter.ingest("Save this: alpha");
+    await vi.advanceTimersByTimeAsync(0);
+    spawn.childRef.value.emitStderr("boom\n");
+    spawn.childRef.value.emitClose(2);
+    const result = await promise;
+    expect(result.status).toBe("failed");
+
+    expect(log.mock.calls.some(([msg]) => /status=failed /.test(String(msg)))).toBe(true);
+    expect(log.mock.calls.some(([msg]) => /spawned=true/.test(String(msg)))).toBe(true);
+    // Subprocess close breadcrumb surfaces code/signal at debug, but we do
+    // not assert the full sequence to avoid overfitting.
+    expect(log.mock.calls.some(([msg]) => /subprocess close .*code=2/.test(String(msg)))).toBe(
+      true,
+    );
+  });
+
+  it("logs only the basename when OPENCLAW_MEMORY_PYTHON is an absolute path", async () => {
+    const spawn = buildSpawn();
+    const log = vi.fn();
+    const env: NodeJS.ProcessEnv = {
+      ...DEBUG_ENV,
+      OPENCLAW_MEMORY_PYTHON: "/Users/who/.venv/bin/python3",
+    };
+    const { adapter } = makeAdapter(env, spawn.spawn, log);
+
+    const promise = adapter.ingest("save this: alpha");
+    await vi.advanceTimersByTimeAsync(0);
+
+    const subprocessStart = log.mock.calls.find(([msg]) =>
+      /subprocess starting /.test(String(msg)),
+    );
+    expect(subprocessStart).toBeDefined();
+    const startMsg = String(subprocessStart?.[0]);
+    expect(startMsg).toContain("python=python3");
+    expect(startMsg).not.toContain("/Users/who");
+    expect(startMsg).not.toContain(".venv/bin");
+
+    spawn.childRef.value.emitClose(0);
+    await promise;
+  });
+
+  it("emits no debug logs when OPENCLAW_MEMORY_DEBUG is unset (default)", async () => {
+    const spawn = buildSpawn();
+    const log = vi.fn();
+    const { adapter } = makeAdapter(ENABLED_ENV, spawn.spawn, log);
+
+    const promise = adapter.ingest("Save this: alpha");
+    await vi.advanceTimersByTimeAsync(0);
+    spawn.childRef.value.emitClose(0);
+    await promise;
+
+    // Only operational messages allowed (e.g. failure logs); no [memory-ingest] breadcrumbs.
+    expect(log.mock.calls.some(([msg]) => String(msg).startsWith("[memory-ingest]"))).toBe(false);
+  });
+
+  it("caps content previews in extracted-content debug breadcrumb", async () => {
+    const spawn = buildSpawn();
+    const log = vi.fn();
+    const { adapter } = makeAdapter(DEBUG_ENV, spawn.spawn, log);
+
+    const longContent = "y".repeat(2000);
+    const promise = adapter.ingest(`save this: ${longContent}`);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const extracted = log.mock.calls.find(([msg]) => /extractedPreview=/.test(String(msg)));
+    expect(extracted).toBeDefined();
+    const extractedMsg = String(extracted?.[0]);
+    const m = extractedMsg.match(/extractedPreview="([^"]*)"/);
+    expect(m).not.toBeNull();
+    if (m) {
+      // 300-char cap + "..." marker when input was longer.
+      expect(m[1]?.endsWith("...")).toBe(true);
+      expect((m[1] ?? "").length).toBeLessThanOrEqual(303);
+    }
+
     spawn.childRef.value.emitClose(0);
     await promise;
   });

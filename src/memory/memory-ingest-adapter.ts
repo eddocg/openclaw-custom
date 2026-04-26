@@ -1,13 +1,12 @@
-import {
-  spawn as nodeSpawn,
-  type ChildProcess,
-  type SpawnOptions,
-} from "node:child_process";
+import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import path from "node:path";
 
 const DEFAULT_PYTHON = "python3";
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_GRACE_MS = 500;
 const DEFAULT_MAX_CONTENT_CHARS = 16_000;
+const DEBUG_PREVIEW_CHARS = 300;
+const NOOP_LOG = (_msg: string): void => {};
 
 const MIN_TIMEOUT_MS = 1;
 const MIN_GRACE_MS = 0;
@@ -84,11 +83,10 @@ type ResolvedConfig = {
   timeoutMs: number;
   graceMs: number;
   strict: boolean;
+  debug: boolean;
 };
 
-export function createMemoryIngestAdapter(
-  deps: MemoryIngestAdapterDeps = {},
-): MemoryIngestAdapter {
+export function createMemoryIngestAdapter(deps: MemoryIngestAdapterDeps = {}): MemoryIngestAdapter {
   const spawnImpl: SpawnFn = (deps.spawn ?? nodeSpawn) as SpawnFn;
   const log = deps.log ?? (() => {});
   const setTimeoutImpl = deps.setTimeoutFn ?? setTimeout;
@@ -98,38 +96,69 @@ export function createMemoryIngestAdapter(
     ingest: async (rawText: string): Promise<MemoryIngestResult> => {
       const env = deps.env ?? process.env;
       const config = readConfig(env);
+      const debugLog = config.debug ? log : NOOP_LOG;
+      const rawChars = typeof rawText === "string" ? rawText.length : 0;
+
+      debugLog(
+        `[memory-ingest] ingest() called rawTextPreview="${previewText(
+          typeof rawText === "string" ? rawText : "",
+          DEBUG_PREVIEW_CHARS,
+        )}" rawTextChars=${rawChars}`,
+      );
 
       if (!config.enabled) {
+        debugLog("[memory-ingest] result status=skipped:disabled spawned=false");
         return { status: "skipped:disabled" };
       }
 
       if (typeof rawText !== "string" || rawText.trim() === "") {
+        debugLog("[memory-ingest] result status=skipped:empty spawned=false");
         return { status: "skipped:empty" };
       }
 
       if (containsForbiddenSubstring(rawText)) {
+        debugLog("[memory-ingest] result status=skipped:wrapped spawned=false");
         return { status: "skipped:wrapped" };
       }
 
       const trigger = matchTrigger(rawText);
       if (!trigger) {
+        debugLog("[memory-ingest] result status=skipped:no_trigger spawned=false");
         return { status: "skipped:no_trigger" };
       }
 
       const content = extractContent(rawText, trigger);
       if (content === "") {
+        debugLog("[memory-ingest] result status=skipped:empty spawned=false");
         return { status: "skipped:empty" };
       }
 
-      return await runIngestSubprocess({
+      const cappedContent = capContent(content);
+      debugLog(
+        `[memory-ingest] trigger="${trigger}" extractedPreview="${previewText(
+          cappedContent,
+          DEBUG_PREVIEW_CHARS,
+        )}" extractedChars=${cappedContent.length}`,
+      );
+
+      const result = await runIngestSubprocess({
         spawnImpl,
         env,
         config,
         log,
+        debugLog,
         setTimeoutImpl,
         clearTimeoutImpl,
-        content: capContent(content),
+        content: cappedContent,
       });
+
+      debugLog(
+        `[memory-ingest] result status=${result.status} reasonPreview="${previewText(
+          result.reason ?? "",
+          DEBUG_PREVIEW_CHARS,
+        )}" spawned=true`,
+      );
+      return result;
     },
   };
 }
@@ -183,24 +212,25 @@ async function runIngestSubprocess(params: {
   env: NodeJS.ProcessEnv;
   config: ResolvedConfig;
   log: (msg: string) => void;
+  debugLog: (msg: string) => void;
   setTimeoutImpl: (handler: () => void, ms: number) => NodeJS.Timeout;
   clearTimeoutImpl: (handle: NodeJS.Timeout) => void;
   content: string;
 }): Promise<MemoryIngestResult> {
-  const { spawnImpl, env, config, log, setTimeoutImpl, clearTimeoutImpl, content } = params;
+  const { spawnImpl, env, config, log, debugLog, setTimeoutImpl, clearTimeoutImpl, content } =
+    params;
+
+  debugLog(
+    `[memory-ingest] subprocess starting python=${describePythonForLog(
+      config.python,
+    )} timeoutMs=${config.timeoutMs} graceMs=${config.graceMs}`,
+  );
 
   let child: ChildProcess;
   try {
     child = spawnImpl(
       config.python,
-      [
-        "-m",
-        MEMORY_INGEST_CLI_MODULE,
-        "--source-type",
-        "memory",
-        "--content",
-        content,
-      ],
+      ["-m", MEMORY_INGEST_CLI_MODULE, "--source-type", "memory", "--content", content],
       {
         env,
         stdio: ["ignore", "pipe", "pipe"],
@@ -214,6 +244,10 @@ async function runIngestSubprocess(params: {
       cause: error,
     });
   }
+
+  debugLog(
+    `[memory-ingest] subprocess spawned=true pid=${child.pid !== undefined ? String(child.pid) : "?"}`,
+  );
 
   return await new Promise<MemoryIngestResult>((resolve, reject) => {
     let settled = false;
@@ -251,6 +285,9 @@ async function runIngestSubprocess(params: {
       }
       detached = true;
       settled = true;
+      debugLog(
+        `[memory-ingest] subprocess detach reason=grace_expired graceMs=${config.graceMs} timeoutMs=${config.timeoutMs}`,
+      );
       resolve({
         status: "detached",
         reason: `ingest still running after grace=${config.graceMs}ms; full timeout=${config.timeoutMs}ms`,
@@ -284,10 +321,7 @@ async function runIngestSubprocess(params: {
       const reason = describeSpawnError(err, config.python);
       const cause = err;
       if (config.strict) {
-        finalize(
-          { status: "failed", reason },
-          new MemoryIngestError(reason, { cause }),
-        );
+        finalize({ status: "failed", reason }, new MemoryIngestError(reason, { cause }));
       } else {
         log(reason);
         finalize({ status: "failed", reason });
@@ -295,15 +329,20 @@ async function runIngestSubprocess(params: {
     });
 
     child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+      debugLog(
+        `[memory-ingest] subprocess close code=${code === null ? "null" : String(code)} signal=${
+          signal ?? "null"
+        } stdoutPreview="${previewText(stdoutBuf, DEBUG_PREVIEW_CHARS)}" stderrPreview="${previewText(
+          stderrBuf,
+          DEBUG_PREVIEW_CHARS,
+        )}" detached=${detached}`,
+      );
       if (signal) {
         const reason = `memory ingest killed by signal ${signal} (timeout=${config.timeoutMs}ms)`;
         const status: MemoryIngestStatus =
           signal === "SIGTERM" || signal === "SIGKILL" ? "timeout" : "failed";
         if (!detached && config.strict) {
-          finalize(
-            { status, reason },
-            new MemoryIngestError(reason),
-          );
+          finalize({ status, reason }, new MemoryIngestError(reason));
         } else {
           log(reason);
           finalize({ status, reason });
@@ -323,10 +362,7 @@ async function runIngestSubprocess(params: {
       const detail = stderrSummary ? `: ${stderrSummary}` : "";
       const reason = `memory ingest exited ${code ?? "null"}${detail}`;
       if (!detached && config.strict) {
-        finalize(
-          { status: "failed", reason },
-          new MemoryIngestError(reason),
-        );
+        finalize({ status: "failed", reason }, new MemoryIngestError(reason));
       } else {
         log(reason);
         finalize({ status: "failed", reason });
@@ -356,6 +392,7 @@ function readConfig(env: NodeJS.ProcessEnv): ResolvedConfig {
     timeoutMs,
     graceMs,
     strict: parseBoolean(env.OPENCLAW_MEMORY_STRICT, false),
+    debug: parseBoolean(env.OPENCLAW_MEMORY_DEBUG, false),
   };
 }
 
@@ -431,4 +468,43 @@ function firstLine(value: string | undefined): string {
   }
   const idx = value.indexOf("\n");
   return (idx === -1 ? value : value.slice(0, idx)).trim();
+}
+
+/**
+ * Build a short, preview-safe representation of `value` for debug logs.
+ *
+ * Collapses runs of whitespace, trims, and caps at `maxChars` characters,
+ * appending an ellipsis if the input was longer. The cap protects logs from
+ * inadvertently echoing full prompts, content payloads, or stderr blobs.
+ * Callers are responsible for choosing inputs that are safe to log; this
+ * helper does not strip secrets.
+ */
+export function previewText(value: string, maxChars: number): string {
+  if (typeof value !== "string" || value === "") {
+    return "";
+  }
+  const collapsed = value.replace(/\s+/g, " ").trim();
+  if (maxChars <= 0) {
+    return "";
+  }
+  if (collapsed.length <= maxChars) {
+    return collapsed;
+  }
+  return `${collapsed.slice(0, maxChars)}...`;
+}
+
+/**
+ * Render the configured Python interpreter for debug logs without leaking
+ * the absolute path. If the interpreter is configured as a path-like value
+ * (contains a path separator), only the basename is logged. Otherwise the
+ * raw token (e.g. `python`, `python3`, `python3.11`) is logged unchanged.
+ */
+function describePythonForLog(python: string): string {
+  if (!python) {
+    return "";
+  }
+  if (python.includes("/") || python.includes("\\")) {
+    return path.basename(python);
+  }
+  return python;
 }

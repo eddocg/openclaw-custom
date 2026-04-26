@@ -26,18 +26,24 @@ describe("runEmbeddedAttempt memory-ingest wiring", () => {
     );
   });
 
-  it("awaits memoryIngester.ingest(params.prompt) at the early run-start seam", async () => {
+  it("awaits memoryIngester.ingest(params.prompt) exactly once at the early run-start seam", async () => {
     const source = await readFile(SOURCE_FILE, "utf8");
 
-    expect(source).toContain(
-      "const memoryIngester = params.memoryIngester ?? createMemoryIngestAdapter();",
+    expect(source).toContain("params.memoryIngester ??");
+    expect(source).toContain("createMemoryIngestAdapter(");
+
+    const ingestCalls = source.match(/memoryIngester\.ingest\(\s*params\.prompt\b/g) ?? [];
+    expect(ingestCalls.length).toBe(1);
+    expect(source).toMatch(
+      /const\s+memoryIngestResult\s*=\s*await\s+memoryIngester\.ingest\(\s*params\.prompt\s*\)/,
     );
-    expect(source).toContain("await memoryIngester.ingest(params.prompt);");
   });
 
   it("invokes ingest before the late-bound memory-context inject (so triggers are evaluated on raw text)", async () => {
     const source = await readFile(SOURCE_FILE, "utf8");
-    const ingestIdx = source.indexOf("await memoryIngester.ingest(params.prompt);");
+    const ingestIdx = source.search(
+      /const\s+memoryIngestResult\s*=\s*await\s+memoryIngester\.ingest\(\s*params\.prompt\s*\)/,
+    );
     const injectIdx = source.indexOf("const submittedPrompt = await memoryInjector.inject({");
     expect(ingestIdx).toBeGreaterThan(-1);
     expect(injectIdx).toBeGreaterThan(-1);
@@ -49,5 +55,25 @@ describe("runEmbeddedAttempt memory-ingest wiring", () => {
 
     expect(source).not.toMatch(/memoryIngester\.ingest\(\s*submittedPrompt/);
     expect(source).not.toMatch(/memoryIngester\.ingest\(\s*effectivePrompt/);
+  });
+
+  it("emits debug-gated seam markers around the ingest call", async () => {
+    const source = await readFile(SOURCE_FILE, "utf8");
+
+    expect(source).toContain("[memory-ingest] seam=embedded-attempt ingest-start");
+    expect(source).toContain("[memory-ingest] seam=embedded-attempt ingest-result");
+    // Both seam markers must be conditional on the OPENCLAW_MEMORY_DEBUG gate.
+    const startIdx = source.indexOf("[memory-ingest] seam=embedded-attempt ingest-start");
+    const before = source.slice(Math.max(0, startIdx - 200), startIdx);
+    expect(before).toContain("memoryIngestDebug");
+  });
+
+  it("passes a debug-gated log callback to the default-constructed adapter", async () => {
+    const source = await readFile(SOURCE_FILE, "utf8");
+
+    // The default adapter is constructed with an explicit `log` field that
+    // is conditional on OPENCLAW_MEMORY_DEBUG so the adapter's own debug
+    // breadcrumbs surface through `log.debug` only when debug is enabled.
+    expect(source).toMatch(/createMemoryIngestAdapter\(\s*\{[\s\S]*?log:\s*memoryIngestDebug/);
   });
 });

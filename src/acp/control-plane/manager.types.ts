@@ -5,6 +5,7 @@ import type {
   SessionEntry,
 } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { logVerbose } from "../../globals.js";
 import {
   createMemoryContextInjector,
   type MemoryContextInjector,
@@ -163,6 +164,19 @@ export type AcpSessionManagerDeps = {
   memoryIngester: MemoryIngestAdapter;
 };
 
+/**
+ * Bridge the ingest adapter's debug breadcrumbs into the ACP `logVerbose`
+ * stream. The adapter only invokes this callback when
+ * `OPENCLAW_MEMORY_DEBUG=true`, so the bridge is a no-op when debug is off.
+ *
+ * Operational (non-debug) failures inside the adapter are also routed through
+ * the same `log` hook, but those messages do not start with the
+ * `[memory-ingest]` debug prefix.
+ */
+function defaultMemoryIngesterLog(msg: string): void {
+  logVerbose(msg);
+}
+
 export const DEFAULT_DEPS: AcpSessionManagerDeps = {
   listAcpSessions: listAcpSessionEntries,
   readSessionEntry: readAcpSessionEntry,
@@ -170,7 +184,7 @@ export const DEFAULT_DEPS: AcpSessionManagerDeps = {
   getRuntimeBackend: getAcpRuntimeBackend,
   requireRuntimeBackend: requireAcpRuntimeBackend,
   memoryInjector: createMemoryContextInjector(),
-  memoryIngester: createMemoryIngestAdapter(),
+  memoryIngester: createMemoryIngestAdapter({ log: defaultMemoryIngesterLog }),
 };
 
 export type { AcpSessionRuntimeOptions, SessionAcpMeta, SessionEntry };

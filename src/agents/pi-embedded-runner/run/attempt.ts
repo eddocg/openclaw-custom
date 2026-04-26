@@ -435,6 +435,15 @@ export function applyEmbeddedAttemptToolsAllow<T extends { name: string }>(
   return tools.filter((tool) => allowSet.has(tool.name));
 }
 
+function isMemoryDebugEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.OPENCLAW_MEMORY_DEBUG;
+  if (typeof raw !== "string") {
+    return false;
+  }
+  const lower = raw.trim().toLowerCase();
+  return lower === "true" || lower === "1" || lower === "yes" || lower === "on";
+}
+
 export async function runEmbeddedAttempt(
   params: EmbeddedRunAttemptParams,
 ): Promise<EmbeddedRunAttemptResult> {
@@ -451,8 +460,25 @@ export async function runEmbeddedAttempt(
   // trigger. The hybrid grace+detach contract bounds the awaited delay to
   // OPENCLAW_MEMORY_INGEST_GRACE_MS so it never blocks the run; pre-wrapped
   // prompts are skipped to avoid double-ingest on retries.
-  const memoryIngester = params.memoryIngester ?? createMemoryIngestAdapter();
-  await memoryIngester.ingest(params.prompt);
+  const memoryIngestDebug = isMemoryDebugEnabled(process.env);
+  const memoryIngester =
+    params.memoryIngester ??
+    createMemoryIngestAdapter({
+      log: memoryIngestDebug
+        ? (msg: string): void => {
+            log.debug(msg);
+          }
+        : undefined,
+    });
+  if (memoryIngestDebug) {
+    log.debug("[memory-ingest] seam=embedded-attempt ingest-start");
+  }
+  const memoryIngestResult = await memoryIngester.ingest(params.prompt);
+  if (memoryIngestDebug) {
+    log.debug(
+      `[memory-ingest] seam=embedded-attempt ingest-result status=${memoryIngestResult.status} reason=${memoryIngestResult.reason ?? "none"}`,
+    );
+  }
 
   await fs.mkdir(resolvedWorkspace, { recursive: true });
 
