@@ -5,6 +5,10 @@ import type {
   SessionEntry,
 } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import {
+  createMemoryContextInjector,
+  type MemoryContextInjector,
+} from "../../memory/memory-context-injection.js";
 import type { AcpRuntimeError } from "../runtime/errors.js";
 import { getAcpRuntimeBackend, requireAcpRuntimeBackend } from "../runtime/registry.js";
 import {
@@ -139,6 +143,13 @@ export type AcpSessionManagerDeps = {
   upsertSessionMeta: typeof upsertAcpSessionMeta;
   getRuntimeBackend: typeof getAcpRuntimeBackend;
   requireRuntimeBackend: typeof requireAcpRuntimeBackend;
+  /**
+   * Shared memory-context envelope injector. Used by `runTurn` to add a
+   * `<memory_context>` block to text bound for the external acpx runtime.
+   * Defaults to a fail-open injector that calls the `openclaw-memory-core`
+   * CLI when `OPENCLAW_MEMORY_ENABLED` is true.
+   */
+  memoryInjector: MemoryContextInjector;
 };
 
 export const DEFAULT_DEPS: AcpSessionManagerDeps = {
@@ -147,6 +158,7 @@ export const DEFAULT_DEPS: AcpSessionManagerDeps = {
   upsertSessionMeta: upsertAcpSessionMeta,
   getRuntimeBackend: getAcpRuntimeBackend,
   requireRuntimeBackend: requireAcpRuntimeBackend,
+  memoryInjector: createMemoryContextInjector(),
 };
 
 export type { AcpSessionRuntimeOptions, SessionAcpMeta, SessionEntry };

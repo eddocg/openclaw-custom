@@ -14,10 +14,11 @@ const FORBIDDEN_TOKENS = [
 ] as const;
 
 describe("message-handler.process.ts memory-prototype guard", () => {
-  // Memory context is now resolved by the ACP-level adapter
-  // (`src/memory/memory-context-adapter.ts` invoked from
-  // `AcpGatewayAgent.prompt`). The Discord handler must not regrow its old
-  // inline memory prototype, or memory context would be injected twice.
+  // Memory context is now resolved by the shared injection helper
+  // (`src/memory/memory-context-injection.ts`) invoked from the embedded
+  // runner and the ACP runtime control plane. The Discord handler must not
+  // regrow its old inline memory prototype, or memory context would be
+  // injected twice.
   it.each(FORBIDDEN_TOKENS)("does not contain forbidden token %j", async (token) => {
     const source = await readFile(SOURCE_FILE, "utf8");
     expect(source).not.toContain(token);

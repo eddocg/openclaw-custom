@@ -4,6 +4,7 @@ import type { ReplyOperation } from "../../../auto-reply/reply/reply-run-registr
 import type { ReasoningLevel, ThinkLevel, VerboseLevel } from "../../../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import type { PromptImageOrderEntry } from "../../../media/prompt-image-order.js";
+import type { MemoryContextInjector } from "../../../memory/memory-context-injection.js";
 import type { CommandQueueEnqueueFn } from "../../../process/command-queue.types.js";
 import type { InputProvenance } from "../../../sessions/input-provenance.js";
 import type { ExecElevatedDefaults, ExecToolDefaults } from "../../bash-tools.exec-types.js";
@@ -146,4 +147,11 @@ export type RunEmbeddedPiAgentParams = {
    * exit promptly after emitting the final JSON result.
    */
   cleanupBundleMcpOnRunEnd?: boolean;
+  /**
+   * Optional injector used to add `<memory_context>` envelopes around the
+   * final layered prompt right before submission. Defaults to a fail-open
+   * injector that calls the `openclaw-memory-core` CLI when
+   * `OPENCLAW_MEMORY_ENABLED` is true. Tests inject a fake.
+   */
+  memoryInjector?: MemoryContextInjector;
 };
