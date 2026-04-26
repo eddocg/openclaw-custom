@@ -40,6 +40,7 @@ import {
   resolveManagerRuntimeCapabilities,
 } from "./manager.runtime-controls.js";
 import {
+  acpMemoryIngestLog,
   type AcpCloseSessionInput,
   type AcpCloseSessionResult,
   type AcpInitializeSessionInput,
@@ -738,11 +739,11 @@ export class AcpSessionManager {
         // double-ingest on retries.
         const memoryIngestDebug = isAcpMemoryDebugEnabled(process.env);
         if (memoryIngestDebug) {
-          logVerbose("[memory-ingest] seam=acp-manager ingest-start");
+          acpMemoryIngestLog.info("[memory-ingest] seam=acp-manager ingest-start");
         }
         const memoryIngestResult = await this.deps.memoryIngester.ingest(input.text);
         if (memoryIngestDebug) {
-          logVerbose(
+          acpMemoryIngestLog.info(
             `[memory-ingest] seam=acp-manager ingest-result status=${memoryIngestResult.status} reason=${memoryIngestResult.reason ?? "none"}`,
           );
         }

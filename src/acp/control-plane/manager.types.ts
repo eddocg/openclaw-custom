@@ -5,7 +5,7 @@ import type {
   SessionEntry,
 } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { logVerbose } from "../../globals.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import {
   createMemoryContextInjector,
   type MemoryContextInjector,
@@ -165,16 +165,33 @@ export type AcpSessionManagerDeps = {
 };
 
 /**
- * Bridge the ingest adapter's debug breadcrumbs into the ACP `logVerbose`
- * stream. The adapter only invokes this callback when
- * `OPENCLAW_MEMORY_DEBUG=true`, so the bridge is a no-op when debug is off.
+ * Dedicated subsystem logger for ACP-side memory ingest breadcrumbs. We use
+ * a named subsystem (rather than the generic `acp` logger) so operators can
+ * filter `acp/memory-ingest` lines in `/tmp/openclaw/openclaw-*.log`, and so
+ * tests can mock `createSubsystemLogger` without affecting unrelated ACP
+ * logging.
+ */
+export const acpMemoryIngestLog = createSubsystemLogger("acp/memory-ingest");
+
+/**
+ * Bridge the ingest adapter's breadcrumbs into the ACP subsystem logger.
  *
- * Operational (non-debug) failures inside the adapter are also routed through
- * the same `log` hook, but those messages do not start with the
- * `[memory-ingest]` debug prefix.
+ * Routing rules:
+ * - Messages prefixed with `[memory-ingest]` go to `info` so they reach the
+ *   gateway log file at the default file log level when
+ *   `OPENCLAW_MEMORY_DEBUG=true`.
+ * - All other messages (operational failure summaries from the adapter)
+ *   stay on `debug` to avoid widening surface area.
+ *
+ * The adapter itself owns the `OPENCLAW_MEMORY_DEBUG` gate; this bridge only
+ * picks the sink for whatever the adapter chose to emit.
  */
 function defaultMemoryIngesterLog(msg: string): void {
-  logVerbose(msg);
+  if (msg.startsWith("[memory-ingest]")) {
+    acpMemoryIngestLog.info(msg);
+  } else {
+    acpMemoryIngestLog.debug(msg);
+  }
 }
 
 export const DEFAULT_DEPS: AcpSessionManagerDeps = {

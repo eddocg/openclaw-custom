@@ -54,7 +54,7 @@ Ingest (`memory-ingest-adapter.ts`) reads:
 | `OPENCLAW_MEMORY_INGEST_TIMEOUT_MS`  | `30000`   | Hard subprocess timeout (ms). Larger than retrieval because the ingest CLI loads the embedding model and writes the row. |
 | `OPENCLAW_MEMORY_INGEST_GRACE_MS`    | `500`     | Awaited window before the call site detaches and continues without blocking the turn. Clamped to `<= timeout`. |
 | `OPENCLAW_MEMORY_STRICT`             | `false`   | Shared. If `true`, surface CLI failures as thrown errors during the grace window. |
-| `OPENCLAW_MEMORY_DEBUG`              | `false`   | Shared. If `true`, the ingest adapter and both ingest seams emit `[memory-ingest]` breadcrumbs through the injected `log` callback (or `log.debug` / `logVerbose` at the seams). Read once per call from `process.env`; restart the gateway after toggling. |
+| `OPENCLAW_MEMORY_DEBUG`              | `false`   | Shared. If `true`, the ingest adapter and both ingest seams emit `[memory-ingest]` breadcrumbs at INFO so they land in the gateway log file at the default file log level (see "Debug observability" below). Read once per call from `process.env`; restart the gateway after toggling. |
 
 All other knobs (DSN, embedding engine, device, etc.) belong to memory-core.
 
@@ -210,9 +210,12 @@ injector. Each seam takes the raw user text:
 
 `AcpSessionManager` accepts the ingester via `AcpSessionManagerDeps`; the
 default ships in `manager.types.ts` (`createMemoryIngestAdapter({ log: ... })`)
-and is overridable in tests. The default `log` bridges adapter messages to
-`logVerbose` so its `[memory-ingest]` breadcrumbs land in the same stream as
-the seam markers below.
+and is overridable in tests. The default `log` is a prefix-routing bridge to
+the dedicated `acp/memory-ingest` subsystem logger: any message starting with
+`[memory-ingest]` is sent to `info` so it lands in the gateway log file at the
+default INFO file level; other operational summaries from the adapter stay
+on `debug`. The embedded seam in `attempt.ts` uses the same prefix-routing
+bridge against its own subsystem logger (`agent/embedded`).
 
 ### Debug observability
 
@@ -221,14 +224,25 @@ When `OPENCLAW_MEMORY_DEBUG=true`:
 - The ingest adapter emits `[memory-ingest]` breadcrumbs at every state
   transition (call entry, every skip status, trigger match, subprocess start,
   spawned PID, grace-expiry detach, child close with code/signal previews,
-  and the final status / reason / spawned). Logs go through the injected
-  `log` callback. Embedded runner uses `log.debug`; ACP runtime uses
-  `logVerbose`.
-- Each seam also emits two short markers for unambiguous attribution:
+  and the final status / reason / spawned). Each breadcrumb goes through the
+  injected `log` callback. Both seams install a prefix-routing bridge that
+  sends `[memory-ingest]`-prefixed messages to the subsystem logger's `info`
+  method (which writes to the gateway log file at the default INFO level)
+  and keeps non-prefixed operational failure summaries on `debug` to avoid
+  widening the log surface.
+  - Embedded seam: `agent/embedded` subsystem logger.
+  - ACP seam: dedicated `acp/memory-ingest` subsystem logger so operators
+    can grep for `[acp/memory-ingest]` in the log file.
+- Each seam also emits two short markers for unambiguous attribution at
+  INFO:
   - Embedded runner: `[memory-ingest] seam=embedded-attempt ingest-start` /
     `seam=embedded-attempt ingest-result status=<status> reason=<reason-or-none>`.
   - ACP runtime: `[memory-ingest] seam=acp-manager ingest-start` /
     `seam=acp-manager ingest-result status=<status> reason=<reason-or-none>`.
+- Once per process, on the first ingest where debug is enabled, the adapter
+  emits the banner `[memory-ingest] debug logging enabled`. Operators can
+  use the banner to confirm INFO routing reaches the log file before
+  sending Discord traffic.
 - All previews are passed through `previewText(...)`: whitespace is
   collapsed, the result is trimmed, and inputs are capped at 300 chars with
   a trailing ellipsis. The configured Python interpreter is logged as just

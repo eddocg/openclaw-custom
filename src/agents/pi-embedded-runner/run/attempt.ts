@@ -461,21 +461,26 @@ export async function runEmbeddedAttempt(
   // OPENCLAW_MEMORY_INGEST_GRACE_MS so it never blocks the run; pre-wrapped
   // prompts are skipped to avoid double-ingest on retries.
   const memoryIngestDebug = isMemoryDebugEnabled(process.env);
+  // Prefix router: keep all `[memory-ingest]` breadcrumbs at INFO so they
+  // reach the gateway log file at the default file log level, while
+  // operational failure summaries (without the prefix) stay on DEBUG to
+  // avoid widening surface area. The adapter still gates breadcrumbs on
+  // OPENCLAW_MEMORY_DEBUG=true; this bridge only chooses the sink.
+  const memoryIngestLogBridge = (msg: string): void => {
+    if (msg.startsWith("[memory-ingest]")) {
+      log.info(msg);
+    } else {
+      log.debug(msg);
+    }
+  };
   const memoryIngester =
-    params.memoryIngester ??
-    createMemoryIngestAdapter({
-      log: memoryIngestDebug
-        ? (msg: string): void => {
-            log.debug(msg);
-          }
-        : undefined,
-    });
+    params.memoryIngester ?? createMemoryIngestAdapter({ log: memoryIngestLogBridge });
   if (memoryIngestDebug) {
-    log.debug("[memory-ingest] seam=embedded-attempt ingest-start");
+    log.info("[memory-ingest] seam=embedded-attempt ingest-start");
   }
   const memoryIngestResult = await memoryIngester.ingest(params.prompt);
   if (memoryIngestDebug) {
-    log.debug(
+    log.info(
       `[memory-ingest] seam=embedded-attempt ingest-result status=${memoryIngestResult.status} reason=${memoryIngestResult.reason ?? "none"}`,
     );
   }

@@ -57,23 +57,36 @@ describe("runEmbeddedAttempt memory-ingest wiring", () => {
     expect(source).not.toMatch(/memoryIngester\.ingest\(\s*effectivePrompt/);
   });
 
-  it("emits debug-gated seam markers around the ingest call", async () => {
+  it("emits debug-gated seam markers around the ingest call at INFO level", async () => {
     const source = await readFile(SOURCE_FILE, "utf8");
 
     expect(source).toContain("[memory-ingest] seam=embedded-attempt ingest-start");
     expect(source).toContain("[memory-ingest] seam=embedded-attempt ingest-result");
+
+    // Both seam markers must use log.info so the gateway's default file log
+    // level (INFO) captures them when OPENCLAW_MEMORY_DEBUG=true.
+    expect(source).toMatch(
+      /log\.info\(\s*"\[memory-ingest\] seam=embedded-attempt ingest-start"\s*\)/,
+    );
+    expect(source).toMatch(/log\.info\(\s*`\[memory-ingest\] seam=embedded-attempt ingest-result/);
+
     // Both seam markers must be conditional on the OPENCLAW_MEMORY_DEBUG gate.
     const startIdx = source.indexOf("[memory-ingest] seam=embedded-attempt ingest-start");
     const before = source.slice(Math.max(0, startIdx - 200), startIdx);
     expect(before).toContain("memoryIngestDebug");
   });
 
-  it("passes a debug-gated log callback to the default-constructed adapter", async () => {
+  it("wires a prefix-routing log bridge into the default-constructed adapter", async () => {
     const source = await readFile(SOURCE_FILE, "utf8");
 
-    // The default adapter is constructed with an explicit `log` field that
-    // is conditional on OPENCLAW_MEMORY_DEBUG so the adapter's own debug
-    // breadcrumbs surface through `log.debug` only when debug is enabled.
-    expect(source).toMatch(/createMemoryIngestAdapter\(\s*\{[\s\S]*?log:\s*memoryIngestDebug/);
+    // The default adapter is constructed with a static prefix-routing bridge:
+    // `[memory-ingest]` breadcrumbs go to log.info (INFO-visible in the
+    // gateway log file); other operational summaries stay on log.debug.
+    expect(source).toMatch(
+      /const\s+memoryIngestLogBridge\s*=\s*\(\s*msg:\s*string\s*\)\s*:\s*void\s*=>\s*\{[\s\S]*?msg\.startsWith\("\[memory-ingest\]"\)[\s\S]*?log\.info\(msg\)[\s\S]*?log\.debug\(msg\)[\s\S]*?\};/,
+    );
+    expect(source).toMatch(
+      /createMemoryIngestAdapter\(\s*\{\s*log:\s*memoryIngestLogBridge\s*\}\s*\)/,
+    );
   });
 });

@@ -16,14 +16,34 @@ const hoisted = vi.hoisted(() => ({
   upsertAcpSessionMetaMock: vi.fn(),
   getAcpRuntimeBackendMock: vi.fn(),
   requireAcpRuntimeBackendMock: vi.fn(),
-  logVerboseMock: vi.fn(),
+  // Captures `info`/`debug` calls only on the dedicated `acp/memory-ingest`
+  // subsystem logger; other subsystems pass through to the real factory.
+  acpMemoryIngestInfoMock: vi.fn(),
+  acpMemoryIngestDebugMock: vi.fn(),
 }));
 
-vi.mock("../../globals.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../globals.js")>();
+vi.mock("../../logging/subsystem.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../logging/subsystem.js")>();
   return {
     ...original,
-    logVerbose: (msg: string) => hoisted.logVerboseMock(msg),
+    createSubsystemLogger: (subsystem: string) => {
+      if (subsystem === "acp/memory-ingest") {
+        const stub = {
+          subsystem,
+          isEnabled: () => true,
+          trace: vi.fn(),
+          debug: (msg: string) => hoisted.acpMemoryIngestDebugMock(msg),
+          info: (msg: string) => hoisted.acpMemoryIngestInfoMock(msg),
+          warn: vi.fn(),
+          error: vi.fn(),
+          fatal: vi.fn(),
+          raw: vi.fn(),
+          child: () => stub,
+        };
+        return stub;
+      }
+      return original.createSubsystemLogger(subsystem);
+    },
   };
 });
 
@@ -128,7 +148,8 @@ describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
         return null;
       }
     });
-    hoisted.logVerboseMock.mockReset();
+    hoisted.acpMemoryIngestInfoMock.mockReset();
+    hoisted.acpMemoryIngestDebugMock.mockReset();
     delete process.env.OPENCLAW_MEMORY_DEBUG;
   });
 
@@ -295,7 +316,7 @@ describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
     expect(runTurn).toHaveBeenCalledTimes(1);
   });
 
-  it("emits seam-start and seam-result logVerbose lines when OPENCLAW_MEMORY_DEBUG=true", async () => {
+  it("emits seam-start and seam-result lines via acpMemoryIngestLog.info when OPENCLAW_MEMORY_DEBUG=true", async () => {
     process.env.OPENCLAW_MEMORY_DEBUG = "true";
 
     const { runtime, runTurn } = createRuntime();
@@ -328,12 +349,19 @@ describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
     expect(memoryIngester.ingest).toHaveBeenCalledTimes(1);
     expect(runTurn).toHaveBeenCalledTimes(1);
 
-    const calls = hoisted.logVerboseMock.mock.calls.map(([msg]) => String(msg));
-    expect(calls.some((m) => /seam=acp-manager ingest-start/.test(m))).toBe(true);
-    expect(calls.some((m) => /seam=acp-manager ingest-result status=succeeded/.test(m))).toBe(true);
-    // Reason must be present (either "ok" or "none"), but we do not assert
-    // the full reason content to avoid overfitting.
-    expect(calls.some((m) => /reason=/.test(m))).toBe(true);
+    const infoCalls = hoisted.acpMemoryIngestInfoMock.mock.calls.map(([msg]) => String(msg));
+    expect(infoCalls.some((m) => /seam=acp-manager ingest-start/.test(m))).toBe(true);
+    expect(infoCalls.some((m) => /seam=acp-manager ingest-result status=succeeded/.test(m))).toBe(
+      true,
+    );
+    // Reason marker must be present (either "ok" or "none"), but we do not
+    // assert the full reason content to avoid overfitting.
+    expect(infoCalls.some((m) => /reason=/.test(m))).toBe(true);
+
+    // Seam markers must NOT be routed to debug, where the file logger filters
+    // them at the default INFO level.
+    const debugCalls = hoisted.acpMemoryIngestDebugMock.mock.calls.map(([msg]) => String(msg));
+    expect(debugCalls.some((m) => /seam=acp-manager/.test(m))).toBe(false);
   });
 
   it("emits no [memory-ingest] seam markers when OPENCLAW_MEMORY_DEBUG is unset", async () => {
@@ -361,7 +389,9 @@ describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
     expect(memoryIngester.ingest).toHaveBeenCalledTimes(1);
     expect(runTurn).toHaveBeenCalledTimes(1);
 
-    const calls = hoisted.logVerboseMock.mock.calls.map(([msg]) => String(msg));
-    expect(calls.some((m) => /\[memory-ingest\] seam=acp-manager/.test(m))).toBe(false);
+    const infoCalls = hoisted.acpMemoryIngestInfoMock.mock.calls.map(([msg]) => String(msg));
+    const debugCalls = hoisted.acpMemoryIngestDebugMock.mock.calls.map(([msg]) => String(msg));
+    expect(infoCalls.some((m) => /\[memory-ingest\] seam=acp-manager/.test(m))).toBe(false);
+    expect(debugCalls.some((m) => /\[memory-ingest\] seam=acp-manager/.test(m))).toBe(false);
   });
 });

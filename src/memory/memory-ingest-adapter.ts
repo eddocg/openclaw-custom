@@ -22,6 +22,22 @@ const TRIGGERS_LONGEST_FIRST = [
 
 const FORBIDDEN_SUBSTRINGS = ["<memory_context>", "<user_request>"] as const;
 
+// Process-wide latch so a single `[memory-ingest] debug logging enabled`
+// banner is emitted on the first ingest where `OPENCLAW_MEMORY_DEBUG=true`.
+// Operators rely on this banner to confirm INFO-routed breadcrumbs reach the
+// gateway log file before sending Discord traffic. Tests reset the latch via
+// `__resetMemoryIngestDebugBannerForTests`.
+let DEBUG_ENABLED_BANNER_EMITTED = false;
+
+/**
+ * Test-only hook to reset the once-per-process banner latch. Production code
+ * never calls this; the banner is intentionally sticky for the lifetime of
+ * the gateway process.
+ */
+export function __resetMemoryIngestDebugBannerForTests(): void {
+  DEBUG_ENABLED_BANNER_EMITTED = false;
+}
+
 export type MemoryIngestStatus =
   | "skipped:disabled"
   | "skipped:no_trigger"
@@ -97,6 +113,10 @@ export function createMemoryIngestAdapter(deps: MemoryIngestAdapterDeps = {}): M
       const env = deps.env ?? process.env;
       const config = readConfig(env);
       const debugLog = config.debug ? log : NOOP_LOG;
+      if (config.debug && !DEBUG_ENABLED_BANNER_EMITTED) {
+        DEBUG_ENABLED_BANNER_EMITTED = true;
+        log("[memory-ingest] debug logging enabled");
+      }
       const rawChars = typeof rawText === "string" ? rawText.length : 0;
 
       debugLog(

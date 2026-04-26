@@ -2,6 +2,7 @@ import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  __resetMemoryIngestDebugBannerForTests,
   containsForbiddenSubstring,
   createMemoryIngestAdapter,
   extractContent,
@@ -515,9 +516,11 @@ describe("previewText", () => {
 describe("debug logging (OPENCLAW_MEMORY_DEBUG=true)", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    __resetMemoryIngestDebugBannerForTests();
   });
   afterEach(() => {
     vi.useRealTimers();
+    __resetMemoryIngestDebugBannerForTests();
   });
 
   const DEBUG_ENV: NodeJS.ProcessEnv = {
@@ -668,5 +671,49 @@ describe("debug logging (OPENCLAW_MEMORY_DEBUG=true)", () => {
 
     spawn.childRef.value.emitClose(0);
     await promise;
+  });
+
+  it("emits the [memory-ingest] debug logging enabled banner exactly once across multiple ingests", async () => {
+    const spawn = buildSpawn();
+    const log = vi.fn();
+    const { adapter } = makeAdapter(DEBUG_ENV, spawn.spawn, log);
+
+    // First ingest should emit the banner.
+    const first = adapter.ingest("Save this: alpha");
+    await vi.advanceTimersByTimeAsync(0);
+    spawn.childRef.value.emitClose(0);
+    await first;
+
+    // Second ingest must not re-emit it.
+    const second = adapter.ingest("Save this: beta");
+    await vi.advanceTimersByTimeAsync(0);
+    spawn.childRef.value.emitClose(0);
+    await second;
+
+    const bannerHits = log.mock.calls.filter(
+      ([msg]) => String(msg) === "[memory-ingest] debug logging enabled",
+    );
+    expect(bannerHits).toHaveLength(1);
+  });
+
+  it("does not emit the banner when OPENCLAW_MEMORY_DEBUG is unset", async () => {
+    const spawn = buildSpawn();
+    const log = vi.fn();
+    const { adapter } = makeAdapter(ENABLED_ENV, spawn.spawn, log);
+
+    const first = adapter.ingest("Save this: alpha");
+    await vi.advanceTimersByTimeAsync(0);
+    spawn.childRef.value.emitClose(0);
+    await first;
+
+    const second = adapter.ingest("Save this: beta");
+    await vi.advanceTimersByTimeAsync(0);
+    spawn.childRef.value.emitClose(0);
+    await second;
+
+    const bannerHits = log.mock.calls.filter(
+      ([msg]) => String(msg) === "[memory-ingest] debug logging enabled",
+    );
+    expect(bannerHits).toHaveLength(0);
   });
 });
