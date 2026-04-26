@@ -5,10 +5,15 @@ import type {
   SessionEntry,
 } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import {
   createMemoryContextInjector,
   type MemoryContextInjector,
 } from "../../memory/memory-context-injection.js";
+import {
+  createMemoryIngestAdapter,
+  type MemoryIngestAdapter,
+} from "../../memory/memory-ingest-adapter.js";
 import type { AcpRuntimeError } from "../runtime/errors.js";
 import { getAcpRuntimeBackend, requireAcpRuntimeBackend } from "../runtime/registry.js";
 import {
@@ -150,7 +155,44 @@ export type AcpSessionManagerDeps = {
    * CLI when `OPENCLAW_MEMORY_ENABLED` is true.
    */
   memoryInjector: MemoryContextInjector;
+  /**
+   * Adapter that detects "remember/save this" triggers in the raw incoming
+   * user prompt and forwards the content to the `openclaw-memory-core`
+   * ingest CLI. Defaults to a fail-open adapter when
+   * `OPENCLAW_MEMORY_ENABLED` is true.
+   */
+  memoryIngester: MemoryIngestAdapter;
 };
+
+/**
+ * Dedicated subsystem logger for ACP-side memory ingest breadcrumbs. We use
+ * a named subsystem (rather than the generic `acp` logger) so operators can
+ * filter `acp/memory-ingest` lines in `/tmp/openclaw/openclaw-*.log`, and so
+ * tests can mock `createSubsystemLogger` without affecting unrelated ACP
+ * logging.
+ */
+export const acpMemoryIngestLog = createSubsystemLogger("acp/memory-ingest");
+
+/**
+ * Bridge the ingest adapter's breadcrumbs into the ACP subsystem logger.
+ *
+ * Routing rules:
+ * - Messages prefixed with `[memory-ingest]` go to `info` so they reach the
+ *   gateway log file at the default file log level when
+ *   `OPENCLAW_MEMORY_DEBUG=true`.
+ * - All other messages (operational failure summaries from the adapter)
+ *   stay on `debug` to avoid widening surface area.
+ *
+ * The adapter itself owns the `OPENCLAW_MEMORY_DEBUG` gate; this bridge only
+ * picks the sink for whatever the adapter chose to emit.
+ */
+function defaultMemoryIngesterLog(msg: string): void {
+  if (msg.startsWith("[memory-ingest]")) {
+    acpMemoryIngestLog.info(msg);
+  } else {
+    acpMemoryIngestLog.debug(msg);
+  }
+}
 
 export const DEFAULT_DEPS: AcpSessionManagerDeps = {
   listAcpSessions: listAcpSessionEntries,
@@ -159,6 +201,7 @@ export const DEFAULT_DEPS: AcpSessionManagerDeps = {
   getRuntimeBackend: getAcpRuntimeBackend,
   requireRuntimeBackend: requireAcpRuntimeBackend,
   memoryInjector: createMemoryContextInjector(),
+  memoryIngester: createMemoryIngestAdapter({ log: defaultMemoryIngesterLog }),
 };
 
 export type { AcpSessionRuntimeOptions, SessionAcpMeta, SessionEntry };

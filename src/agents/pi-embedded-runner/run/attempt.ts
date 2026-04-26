@@ -15,6 +15,7 @@ import { resolveHeartbeatSummaryForAgent } from "../../../infra/heartbeat-summar
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
 import { createMemoryContextInjector } from "../../../memory/memory-context-injection.js";
+import { createMemoryIngestAdapter } from "../../../memory/memory-ingest-adapter.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
 import { resolveToolCallArgumentsEncoding } from "../../../plugins/provider-model-compat.js";
 import {
@@ -434,6 +435,15 @@ export function applyEmbeddedAttemptToolsAllow<T extends { name: string }>(
   return tools.filter((tool) => allowSet.has(tool.name));
 }
 
+function isMemoryDebugEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.OPENCLAW_MEMORY_DEBUG;
+  if (typeof raw !== "string") {
+    return false;
+  }
+  const lower = raw.trim().toLowerCase();
+  return lower === "true" || lower === "1" || lower === "yes" || lower === "on";
+}
+
 export async function runEmbeddedAttempt(
   params: EmbeddedRunAttemptParams,
 ): Promise<EmbeddedRunAttemptResult> {
@@ -444,6 +454,36 @@ export async function runEmbeddedAttempt(
   log.debug(
     `embedded run start: runId=${params.runId} sessionId=${params.sessionId} provider=${params.provider} model=${params.modelId} thinking=${params.thinkLevel} messageChannel=${params.messageChannel ?? params.messageProvider ?? "unknown"}`,
   );
+
+  // Best-effort semantic-memory ingest. The adapter no-ops unless memory is
+  // enabled and the raw user prompt starts with a "remember/save this"
+  // trigger. The hybrid grace+detach contract bounds the awaited delay to
+  // OPENCLAW_MEMORY_INGEST_GRACE_MS so it never blocks the run; pre-wrapped
+  // prompts are skipped to avoid double-ingest on retries.
+  const memoryIngestDebug = isMemoryDebugEnabled(process.env);
+  // Prefix router: keep all `[memory-ingest]` breadcrumbs at INFO so they
+  // reach the gateway log file at the default file log level, while
+  // operational failure summaries (without the prefix) stay on DEBUG to
+  // avoid widening surface area. The adapter still gates breadcrumbs on
+  // OPENCLAW_MEMORY_DEBUG=true; this bridge only chooses the sink.
+  const memoryIngestLogBridge = (msg: string): void => {
+    if (msg.startsWith("[memory-ingest]")) {
+      log.info(msg);
+    } else {
+      log.debug(msg);
+    }
+  };
+  const memoryIngester =
+    params.memoryIngester ?? createMemoryIngestAdapter({ log: memoryIngestLogBridge });
+  if (memoryIngestDebug) {
+    log.info("[memory-ingest] seam=embedded-attempt ingest-start");
+  }
+  const memoryIngestResult = await memoryIngester.ingest(params.prompt);
+  if (memoryIngestDebug) {
+    log.info(
+      `[memory-ingest] seam=embedded-attempt ingest-result status=${memoryIngestResult.status} reason=${memoryIngestResult.reason ?? "none"}`,
+    );
+  }
 
   await fs.mkdir(resolvedWorkspace, { recursive: true });
 

@@ -5,6 +5,7 @@ import type { ReasoningLevel, ThinkLevel, VerboseLevel } from "../../../auto-rep
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import type { PromptImageOrderEntry } from "../../../media/prompt-image-order.js";
 import type { MemoryContextInjector } from "../../../memory/memory-context-injection.js";
+import type { MemoryIngestAdapter } from "../../../memory/memory-ingest-adapter.js";
 import type { CommandQueueEnqueueFn } from "../../../process/command-queue.types.js";
 import type { InputProvenance } from "../../../sessions/input-provenance.js";
 import type { ExecElevatedDefaults, ExecToolDefaults } from "../../bash-tools.exec-types.js";
@@ -154,4 +155,11 @@ export type RunEmbeddedPiAgentParams = {
    * `OPENCLAW_MEMORY_ENABLED` is true. Tests inject a fake.
    */
   memoryInjector?: MemoryContextInjector;
+  /**
+   * Optional adapter that detects "remember/save this" triggers in the raw
+   * incoming user prompt and forwards the content to the
+   * `openclaw-memory-core` ingest CLI. Defaults to a fail-open adapter when
+   * `OPENCLAW_MEMORY_ENABLED` is true. Tests inject a fake.
+   */
+  memoryIngester?: MemoryIngestAdapter;
 };

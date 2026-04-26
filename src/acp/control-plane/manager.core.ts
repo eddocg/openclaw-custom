@@ -40,6 +40,7 @@ import {
   resolveManagerRuntimeCapabilities,
 } from "./manager.runtime-controls.js";
 import {
+  acpMemoryIngestLog,
   type AcpCloseSessionInput,
   type AcpCloseSessionResult,
   type AcpInitializeSessionInput,
@@ -151,6 +152,15 @@ type BackgroundTaskContext = {
   label?: string;
   task: string;
 };
+
+function isAcpMemoryDebugEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.OPENCLAW_MEMORY_DEBUG;
+  if (typeof raw !== "string") {
+    return false;
+  }
+  const lower = raw.trim().toLowerCase();
+  return lower === "true" || lower === "1" || lower === "yes" || lower === "on";
+}
 
 export class AcpSessionManager {
   private readonly actorQueue = new SessionActorQueue();
@@ -721,6 +731,21 @@ export class AcpSessionManager {
             : null;
         if (taskContext) {
           this.createBackgroundTaskRecord(taskContext, turnStartedAt);
+        }
+        // Best-effort semantic-memory ingest. The adapter no-ops unless
+        // memory is enabled and the raw user text starts with a "remember
+        // /save this" trigger. The hybrid grace+detach contract bounds the
+        // awaited delay; pre-wrapped prompts skip ingest to avoid
+        // double-ingest on retries.
+        const memoryIngestDebug = isAcpMemoryDebugEnabled(process.env);
+        if (memoryIngestDebug) {
+          acpMemoryIngestLog.info("[memory-ingest] seam=acp-manager ingest-start");
+        }
+        const memoryIngestResult = await this.deps.memoryIngester.ingest(input.text);
+        if (memoryIngestDebug) {
+          acpMemoryIngestLog.info(
+            `[memory-ingest] seam=acp-manager ingest-result status=${memoryIngestResult.status} reason=${memoryIngestResult.reason ?? "none"}`,
+          );
         }
         // Apply the shared memory-context envelope to the runtime-bound text.
         // The background task summary above keeps using raw `input.text` so
