@@ -150,24 +150,56 @@ ACP gateway translator without per-channel duplication.
 
 ### Trigger detection
 
-Conservative, longest-prefix-first, case-insensitive, leading whitespace
-tolerated:
+Conservative, longest-first, case-insensitive across both paths below:
 
 1. `remember this as semantic memory`
 2. `save this as semantic memory`
 3. `remember this`
 4. `save this`
 
-Any other prefix returns `skipped:no_trigger` and the adapter does not
-spawn.
+Detection runs in two passes. The first pass is the legacy prefix path:
+strip leading whitespace and check `startsWith(...)` against the trigger
+list. This covers the local CLI / ACP runtime, where the runtime seam hands
+the adapter the raw user utterance.
+
+The second pass is a bounded scan that catches wrapped channel prompts
+(notably Discord, where `Conversation info (untrusted metadata)` /
+`Sender (untrusted metadata)` blocks precede the user body). It only
+inspects the **first 1000 characters** of the raw text and only accepts
+matches at a logical message boundary: either at the start of the window,
+immediately after `\n`/`\r`, or after a chain of inline whitespace plus
+optional block-quote (`>`) and quote glyphs (`"`, `'`, `` ` ``, smart
+quotes). The trigger must also be followed by whitespace, end-of-string,
+or one of `:`, `.`, `!`, `?`, `,`, `;` so prefix-of-a-longer-word matches
+(`remember thistle…`) are rejected. Anything past the 1000-character
+window is treated as no trigger.
+
+The exported helpers are:
+
+- `matchTrigger(rawText)`: prefix-only predicate, retained as the public
+  contract used by tests and external callers.
+- `findTrigger(rawText)`: returns `{ trigger, index }` for the first
+  trigger that satisfies either pass; this is what the runtime ingest
+  path calls so callers never slice with the wrong trigger length.
+
+Any non-match returns `skipped:no_trigger` and the adapter does not spawn.
 
 ### Content extraction
 
-If the matched trigger is followed by a `:` or `::` (with optional
-whitespace), the content sent to the CLI is the remainder after the colon,
-trimmed. Otherwise the content is the original raw text, trimmed. The
-content is hard-capped at 16 KB before being passed as `--content` to bound
-the subprocess argv.
+`extractContent(rawText, trigger, index)` resolves the payload sent to the
+CLI based on the absolute `index` returned by `findTrigger`:
+
+- With `: payload` or `:: payload` immediately after the trigger (with
+  optional whitespace), returns `payload` trimmed.
+- With no colon and `index === 0`, falls back to the trimmed raw text so
+  the legacy "ingest the whole utterance" semantics survive unchanged for
+  unwrapped local-CLI / ACP prompts.
+- With no colon and `index > 0`, drops everything before the trigger
+  (channel metadata) and returns the post-trigger remainder trimmed, so
+  wrapped prompts never leak their inbound-meta blocks into ingest.
+
+The content is hard-capped at 16 KB before being passed as `--content` to
+bound the subprocess argv.
 
 ### Double-ingest guard
 
@@ -222,14 +254,15 @@ bridge against its own subsystem logger (`agent/embedded`).
 When `OPENCLAW_MEMORY_DEBUG=true`:
 
 - The ingest adapter emits `[memory-ingest]` breadcrumbs at every state
-  transition (call entry, every skip status, trigger match, subprocess start,
-  spawned PID, grace-expiry detach, child close with code/signal previews,
-  and the final status / reason / spawned). Each breadcrumb goes through the
-  injected `log` callback. Both seams install a prefix-routing bridge that
-  sends `[memory-ingest]`-prefixed messages to the subsystem logger's `info`
-  method (which writes to the gateway log file at the default INFO level)
-  and keeps non-prefixed operational failure summaries on `debug` to avoid
-  widening the log surface.
+  transition (call entry, every skip status, trigger match with
+  `triggerIndex=` so wrapped vs prefix matches are unambiguous, subprocess
+  start, spawned PID, grace-expiry detach, child close with code/signal
+  previews, and the final status / reason / spawned). Each breadcrumb goes
+  through the injected `log` callback. Both seams install a prefix-routing
+  bridge that sends `[memory-ingest]`-prefixed messages to the subsystem
+  logger's `info` method (which writes to the gateway log file at the
+  default INFO level) and keeps non-prefixed operational failure summaries
+  on `debug` to avoid widening the log surface.
   - Embedded seam: `agent/embedded` subsystem logger.
   - ACP seam: dedicated `acp/memory-ingest` subsystem logger so operators
     can grep for `[acp/memory-ingest]` in the log file.

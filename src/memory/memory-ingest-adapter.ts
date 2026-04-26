@@ -22,6 +22,25 @@ const TRIGGERS_LONGEST_FIRST = [
 
 const FORBIDDEN_SUBSTRINGS = ["<memory_context>", "<user_request>"] as const;
 
+// Bounded scan window for the wrapped-prompt path. Channel adapters (notably
+// Discord) prepend "Conversation info (untrusted metadata)" / "Sender ..."
+// blocks before the user body, so the trigger can land hundreds of characters
+// in. We only scan the first SCAN_WINDOW_CHARS to keep false positives low and
+// preserve cheap rejection on long, unrelated prose.
+const SCAN_WINDOW_CHARS = 1000;
+
+// Characters that may legitimately precede a trigger at the start of a user
+// message inside a wrapped prompt: line break, code-fence boundary (already on
+// its own line so the newline rule covers it), block-quote markers, and quote
+// glyphs commonly emitted by chat clients. Conservative on purpose: anything
+// alphanumeric or `_` is treated as "inside a word" and rejected.
+const BOUNDARY_QUOTE_CHARS = new Set(['"', "'", "\u201C", "\u201D", "\u2018", "\u2019", "`"]);
+
+// Characters that may legitimately follow a trigger token. Letters / digits /
+// underscore would mean we matched the prefix of a longer word ("remember this
+// time"), so those are excluded.
+const TRAILING_BOUNDARY_CHARS = new Set([" ", "\t", ":", ".", "!", "?", ",", ";", "\n", "\r"]);
+
 // Process-wide latch so a single `[memory-ingest] debug logging enabled`
 // banner is emitted on the first ingest where `OPENCLAW_MEMORY_DEBUG=true`.
 // Operators rely on this banner to confirm INFO-routed breadcrumbs reach the
@@ -141,13 +160,13 @@ export function createMemoryIngestAdapter(deps: MemoryIngestAdapterDeps = {}): M
         return { status: "skipped:wrapped" };
       }
 
-      const trigger = matchTrigger(rawText);
-      if (!trigger) {
+      const match = findTrigger(rawText);
+      if (!match) {
         debugLog("[memory-ingest] result status=skipped:no_trigger spawned=false");
         return { status: "skipped:no_trigger" };
       }
 
-      const content = extractContent(rawText, trigger);
+      const content = extractContent(rawText, match.trigger, match.index);
       if (content === "") {
         debugLog("[memory-ingest] result status=skipped:empty spawned=false");
         return { status: "skipped:empty" };
@@ -155,7 +174,7 @@ export function createMemoryIngestAdapter(deps: MemoryIngestAdapterDeps = {}): M
 
       const cappedContent = capContent(content);
       debugLog(
-        `[memory-ingest] trigger="${trigger}" extractedPreview="${previewText(
+        `[memory-ingest] trigger="${match.trigger}" triggerIndex=${match.index} extractedPreview="${previewText(
           cappedContent,
           DEBUG_PREVIEW_CHARS,
         )}" extractedChars=${cappedContent.length}`,
@@ -183,7 +202,19 @@ export function createMemoryIngestAdapter(deps: MemoryIngestAdapterDeps = {}): M
   };
 }
 
+/**
+ * Prefix-only trigger detection retained for the public contract.
+ *
+ * Strips leading whitespace, then matches a trigger as a left-anchored prefix
+ * (longest-first, case-insensitive). This is the legacy, narrow predicate
+ * used directly by tests and any external callers; the runtime ingest path
+ * uses {@link findTrigger}, which extends this with a bounded scan-window
+ * search across wrapped channel prompts.
+ */
 export function matchTrigger(rawText: string): string | null {
+  if (typeof rawText !== "string" || rawText === "") {
+    return null;
+  }
   const head = stripLeadingWhitespace(rawText).toLowerCase();
   for (const trigger of TRIGGERS_LONGEST_FIRST) {
     if (head.startsWith(trigger)) {
@@ -193,9 +224,78 @@ export function matchTrigger(rawText: string): string | null {
   return null;
 }
 
-export function extractContent(rawText: string, trigger: string): string {
-  const stripped = stripLeadingWhitespace(rawText);
-  const remainder = stripped.slice(trigger.length);
+/**
+ * Resolve a save-memory trigger anywhere within the bounded scan window.
+ *
+ * Performs a conservative line-based scan across the first
+ * {@link SCAN_WINDOW_CHARS} characters of `rawText`. The scan covers both
+ * legacy unwrapped prompts (where the trigger sits at index 0 / after
+ * leading whitespace) and wrapped channel prompts (notably Discord, where
+ * metadata blocks precede the user body) without a separate prefix branch:
+ * {@link isLeftBoundary} accepts position 0, line starts, and inline-quote
+ * / block-quote / code-fence prefixes uniformly. {@link isRightBoundary}
+ * additionally requires the character after the trigger to be whitespace,
+ * end-of-string, or terminal punctuation so the scan rejects matches that
+ * are prefixes of longer words (e.g. `remember thistle`).
+ *
+ * Returns the matched trigger token in lower-case (for stable downstream
+ * routing) and the absolute index in `rawText` where the trigger starts.
+ * The caller passes that index to {@link extractContent} so we never slice
+ * with the wrong trigger length.
+ *
+ * Anything past the {@link SCAN_WINDOW_CHARS} window is treated as if no
+ * trigger were present, keeping cost predictable on long prompts and false
+ * positives low.
+ */
+export function findTrigger(rawText: string): { trigger: string; index: number } | null {
+  if (typeof rawText !== "string" || rawText === "") {
+    return null;
+  }
+
+  const window = rawText.slice(0, SCAN_WINDOW_CHARS);
+  const lowerWindow = window.toLowerCase();
+
+  for (const trigger of TRIGGERS_LONGEST_FIRST) {
+    let searchFrom = 0;
+    while (searchFrom <= lowerWindow.length - trigger.length) {
+      const candidate = lowerWindow.indexOf(trigger, searchFrom);
+      if (candidate === -1) {
+        break;
+      }
+      if (
+        isLeftBoundary(rawText, candidate) &&
+        isRightBoundary(rawText, candidate + trigger.length)
+      ) {
+        return { trigger, index: candidate };
+      }
+      searchFrom = candidate + 1;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Extract the payload to ingest, given the trigger and its absolute start
+ * position in `rawText`.
+ *
+ * - With `: payload` or `:: payload` immediately after the trigger, returns
+ *   `payload` (existing local-CLI / ACP behavior).
+ * - With no colon and `index === 0`, falls back to the original trimmed text
+ *   so the legacy "ingest the whole utterance" behavior survives unchanged.
+ * - With no colon and `index > 0`, drops everything before the trigger
+ *   (channel metadata) and returns `rawText.slice(index + trigger.length).trim()`
+ *   so wrapped prompts never leak their inbound-meta blocks into ingest.
+ */
+export function extractContent(rawText: string, trigger: string, index = 0): string {
+  if (typeof rawText !== "string" || rawText === "") {
+    return "";
+  }
+  if (index < 0 || index > rawText.length) {
+    return "";
+  }
+
+  const remainder = rawText.slice(index + trigger.length);
   const trimmedRemainder = remainder.replace(/^\s+/, "");
 
   if (trimmedRemainder.startsWith("::")) {
@@ -205,7 +305,52 @@ export function extractContent(rawText: string, trigger: string): string {
     return trimmedRemainder.slice(1).trim();
   }
 
-  return rawText.trim();
+  if (index === 0) {
+    return rawText.trim();
+  }
+
+  return remainder.trim();
+}
+
+function isLeftBoundary(rawText: string, position: number): boolean {
+  if (position === 0) {
+    return true;
+  }
+
+  // Walk back over inline whitespace and conservative quote/fence prefixes on
+  // the same line to find the previous "structural" character. If we hit a
+  // newline first, the trigger starts the line — accept it. If we hit an
+  // alphanumeric / underscore character, we're inside a word — reject it.
+  let cursor = position - 1;
+  while (cursor >= 0) {
+    const ch = rawText[cursor];
+    if (ch === "\n" || ch === "\r") {
+      return true;
+    }
+    if (ch === " " || ch === "\t") {
+      cursor -= 1;
+      continue;
+    }
+    if (BOUNDARY_QUOTE_CHARS.has(ch)) {
+      cursor -= 1;
+      continue;
+    }
+    if (ch === ">") {
+      // Markdown / chat block-quote prefix: `> trigger`.
+      cursor -= 1;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+function isRightBoundary(rawText: string, position: number): boolean {
+  if (position >= rawText.length) {
+    return true;
+  }
+  const ch = rawText[position];
+  return TRAILING_BOUNDARY_CHARS.has(ch);
 }
 
 export function containsForbiddenSubstring(rawText: string): boolean {

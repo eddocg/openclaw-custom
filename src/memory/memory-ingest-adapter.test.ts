@@ -6,6 +6,7 @@ import {
   containsForbiddenSubstring,
   createMemoryIngestAdapter,
   extractContent,
+  findTrigger,
   matchTrigger,
   MemoryIngestError,
   previewText,
@@ -138,6 +139,100 @@ describe("extractContent", () => {
     expect(extractContent("Remember this: alpha: beta: gamma", "remember this")).toBe(
       "alpha: beta: gamma",
     );
+  });
+
+  it("with index>0, drops preceding text and returns the post-trigger remainder when no colon is present", () => {
+    const wrapped = "metadata blob\n\nremember this orange falcon 246";
+    const idx = wrapped.indexOf("remember this");
+    expect(extractContent(wrapped, "remember this", idx)).toBe("orange falcon 246");
+  });
+
+  it("with index>0, returns the colon payload and excludes preceding metadata", () => {
+    const wrapped =
+      "Conversation info (untrusted metadata):\n```json\n{}\n```\n\nRemember this as semantic memory: GREEN JAGUAR 617.";
+    const idx = wrapped.toLowerCase().indexOf("remember this as semantic memory");
+    expect(extractContent(wrapped, "remember this as semantic memory", idx)).toBe(
+      "GREEN JAGUAR 617.",
+    );
+  });
+});
+
+describe("findTrigger", () => {
+  it("returns the prefix trigger with its absolute leading-whitespace index", () => {
+    expect(findTrigger("Remember this: x")).toEqual({ trigger: "remember this", index: 0 });
+    expect(findTrigger("  \n  remember this: x")).toEqual({
+      trigger: "remember this",
+      index: 5,
+    });
+  });
+
+  it("matches longest trigger first within a wrapped Discord-style prompt", () => {
+    const wrapped = [
+      "Conversation info (untrusted metadata):",
+      "```json",
+      `{"chat_id":"abc","sender":"user"}`,
+      "```",
+      "",
+      "Sender (untrusted metadata):",
+      "```json",
+      `{"label":"Eddo","id":"42"}`,
+      "```",
+      "",
+      "Remember this as semantic memory: GREEN JAGUAR 617.",
+    ].join("\n");
+    const result = findTrigger(wrapped);
+    expect(result).not.toBeNull();
+    expect(result?.trigger).toBe("remember this as semantic memory");
+    expect(result?.index).toBeGreaterThan(0);
+    expect(wrapped.toLowerCase().slice(result?.index)).toMatch(
+      /^remember this as semantic memory:/,
+    );
+  });
+
+  it("does not match when the trigger appears beyond the 1000-char scan window", () => {
+    const filler = "x".repeat(1100);
+    const text = `${filler}\nRemember this as semantic memory: TOO LATE.`;
+    expect(findTrigger(text)).toBeNull();
+  });
+
+  it("matches when the trigger lands just inside the 1000-char scan window", () => {
+    const filler = "x".repeat(900);
+    const text = `${filler}\nRemember this: barely in.`;
+    const result = findTrigger(text);
+    expect(result).not.toBeNull();
+    expect(result?.trigger).toBe("remember this");
+    expect(result?.index).toBe(901);
+  });
+
+  it("rejects 'remember this' embedded in mid-prose (not at a message boundary)", () => {
+    expect(findTrigger("please remember this thing later")).toBeNull();
+    expect(findTrigger("hello world. please remember this is important.")).toBeNull();
+  });
+
+  it("rejects matches that are prefixes of longer words (right-boundary check)", () => {
+    expect(findTrigger("remember thistle bushes")).toBeNull();
+    expect(findTrigger("\nremember thistle bushes")).toBeNull();
+  });
+
+  it("accepts triggers preceded by block-quote and quote glyphs at line start", () => {
+    expect(findTrigger("\n> Remember this: greeted")).toEqual({
+      trigger: "remember this",
+      index: 3,
+    });
+    expect(findTrigger('\n"Remember this: greeted"')).toEqual({
+      trigger: "remember this",
+      index: 2,
+    });
+  });
+
+  it("is case-insensitive across the wrapped path", () => {
+    const wrapped = "metadata\n\nREMEMBER THIS AS SEMANTIC MEMORY: ORANGE FALCON 246";
+    const result = findTrigger(wrapped);
+    expect(result?.trigger).toBe("remember this as semantic memory");
+  });
+
+  it("returns null on empty input", () => {
+    expect(findTrigger("")).toBeNull();
   });
 });
 
@@ -489,6 +584,88 @@ describe("createMemoryIngestAdapter", () => {
     spawn.childRef.value.emitClose(0);
     await promise;
   });
+
+  it("ingests a Discord-wrapped prompt and forwards only the post-trigger payload", async () => {
+    const spawn = buildSpawn();
+    const { adapter } = makeAdapter(ENABLED_ENV, spawn.spawn);
+
+    const wrapped = [
+      "Conversation info (untrusted metadata):",
+      "```json",
+      `{"chat_id":"abc","sender":"user"}`,
+      "```",
+      "",
+      "Sender (untrusted metadata):",
+      "```json",
+      `{"label":"Eddo","id":"42"}`,
+      "```",
+      "",
+      "Remember this as semantic memory: The OpenClaw Discord wrapped trigger phrase is GREEN JAGUAR 617.",
+    ].join("\n");
+
+    const promise = adapter.ingest(wrapped);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(spawn.calls).toHaveLength(1);
+    const passedContent = spawn.calls[0]?.args[5] ?? "";
+    expect(passedContent).toBe("The OpenClaw Discord wrapped trigger phrase is GREEN JAGUAR 617.");
+
+    spawn.childRef.value.emitClose(0);
+    const result = await promise;
+    expect(result.status).toBe("succeeded");
+  });
+
+  it("does not spawn for a wrapped prompt where the trigger lands beyond the 1000-char window", async () => {
+    const spawn = buildSpawn();
+    const { adapter } = makeAdapter(ENABLED_ENV, spawn.spawn);
+
+    const filler = "x".repeat(1100);
+    const result = await adapter.ingest(`${filler}\nRemember this: missed window.`);
+    expect(result.status).toBe("skipped:no_trigger");
+    expect(spawn.calls).toHaveLength(0);
+  });
+
+  it("does not spawn for mid-prose 'remember this' inside metadata-like content", async () => {
+    const spawn = buildSpawn();
+    const { adapter } = makeAdapter(ENABLED_ENV, spawn.spawn);
+
+    const wrapped = [
+      "Conversation info (untrusted metadata):",
+      "```json",
+      `{"hint":"please remember this is just metadata"}`,
+      "```",
+      "",
+      "Hello bot, can you tell me about memory?",
+    ].join("\n");
+
+    const result = await adapter.ingest(wrapped);
+    expect(result.status).toBe("skipped:no_trigger");
+    expect(spawn.calls).toHaveLength(0);
+  });
+
+  it("forbidden-substring guard wins over scan-window match in wrapped retrieval prompts", async () => {
+    const spawn = buildSpawn();
+    const { adapter } = makeAdapter(ENABLED_ENV, spawn.spawn);
+
+    const wrapped = [
+      "Conversation info (untrusted metadata):",
+      "```json",
+      `{"chat_id":"abc"}`,
+      "```",
+      "",
+      "<memory_context>",
+      "earlier retrieval",
+      "</memory_context>",
+      "",
+      "<user_request>",
+      "Remember this as semantic memory: NESTED VALUE",
+      "</user_request>",
+    ].join("\n");
+
+    const result = await adapter.ingest(wrapped);
+    expect(result.status).toBe("skipped:wrapped");
+    expect(spawn.calls).toHaveLength(0);
+  });
 });
 
 describe("previewText", () => {
@@ -647,6 +824,35 @@ describe("debug logging (OPENCLAW_MEMORY_DEBUG=true)", () => {
 
     // Only operational messages allowed (e.g. failure logs); no [memory-ingest] breadcrumbs.
     expect(log.mock.calls.some(([msg]) => String(msg).startsWith("[memory-ingest]"))).toBe(false);
+  });
+
+  it("emits triggerIndex in the trigger-match debug breadcrumb on wrapped prompts", async () => {
+    const spawn = buildSpawn();
+    const log = vi.fn();
+    const { adapter } = makeAdapter(DEBUG_ENV, spawn.spawn, log);
+
+    const wrapped = [
+      "Conversation info (untrusted metadata):",
+      "```json",
+      `{"chat_id":"abc"}`,
+      "```",
+      "",
+      "Remember this as semantic memory: GREEN JAGUAR 617.",
+    ].join("\n");
+
+    const promise = adapter.ingest(wrapped);
+    await vi.advanceTimersByTimeAsync(0);
+    spawn.childRef.value.emitClose(0);
+    await promise;
+
+    const triggerLine = log.mock.calls.find(([msg]) =>
+      /\[memory-ingest\] trigger="remember this as semantic memory"/.test(String(msg)),
+    );
+    expect(triggerLine).toBeDefined();
+    const triggerMsg = String(triggerLine?.[0]);
+    const m = triggerMsg.match(/triggerIndex=(\d+)/);
+    expect(m).not.toBeNull();
+    expect(Number(m?.[1])).toBeGreaterThan(0);
   });
 
   it("caps content previews in extracted-content debug breadcrumb", async () => {
