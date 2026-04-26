@@ -9,6 +9,10 @@ import {
   createMemoryContextInjector,
   type MemoryContextInjector,
 } from "../../memory/memory-context-injection.js";
+import {
+  createMemoryIngestAdapter,
+  type MemoryIngestAdapter,
+} from "../../memory/memory-ingest-adapter.js";
 import type { AcpRuntimeError } from "../runtime/errors.js";
 import { getAcpRuntimeBackend, requireAcpRuntimeBackend } from "../runtime/registry.js";
 import {
@@ -150,6 +154,13 @@ export type AcpSessionManagerDeps = {
    * CLI when `OPENCLAW_MEMORY_ENABLED` is true.
    */
   memoryInjector: MemoryContextInjector;
+  /**
+   * Adapter that detects "remember/save this" triggers in the raw incoming
+   * user prompt and forwards the content to the `openclaw-memory-core`
+   * ingest CLI. Defaults to a fail-open adapter when
+   * `OPENCLAW_MEMORY_ENABLED` is true.
+   */
+  memoryIngester: MemoryIngestAdapter;
 };
 
 export const DEFAULT_DEPS: AcpSessionManagerDeps = {
@@ -159,6 +170,7 @@ export const DEFAULT_DEPS: AcpSessionManagerDeps = {
   getRuntimeBackend: getAcpRuntimeBackend,
   requireRuntimeBackend: requireAcpRuntimeBackend,
   memoryInjector: createMemoryContextInjector(),
+  memoryIngester: createMemoryIngestAdapter(),
 };
 
 export type { AcpSessionRuntimeOptions, SessionAcpMeta, SessionEntry };

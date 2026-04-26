@@ -15,6 +15,7 @@ import { resolveHeartbeatSummaryForAgent } from "../../../infra/heartbeat-summar
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
 import { createMemoryContextInjector } from "../../../memory/memory-context-injection.js";
+import { createMemoryIngestAdapter } from "../../../memory/memory-ingest-adapter.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
 import { resolveToolCallArgumentsEncoding } from "../../../plugins/provider-model-compat.js";
 import {
@@ -444,6 +445,14 @@ export async function runEmbeddedAttempt(
   log.debug(
     `embedded run start: runId=${params.runId} sessionId=${params.sessionId} provider=${params.provider} model=${params.modelId} thinking=${params.thinkLevel} messageChannel=${params.messageChannel ?? params.messageProvider ?? "unknown"}`,
   );
+
+  // Best-effort semantic-memory ingest. The adapter no-ops unless memory is
+  // enabled and the raw user prompt starts with a "remember/save this"
+  // trigger. The hybrid grace+detach contract bounds the awaited delay to
+  // OPENCLAW_MEMORY_INGEST_GRACE_MS so it never blocks the run; pre-wrapped
+  // prompts are skipped to avoid double-ingest on retries.
+  const memoryIngester = params.memoryIngester ?? createMemoryIngestAdapter();
+  await memoryIngester.ingest(params.prompt);
 
   await fs.mkdir(resolvedWorkspace, { recursive: true });
 

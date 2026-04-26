@@ -722,6 +722,12 @@ export class AcpSessionManager {
         if (taskContext) {
           this.createBackgroundTaskRecord(taskContext, turnStartedAt);
         }
+        // Best-effort semantic-memory ingest. The adapter no-ops unless
+        // memory is enabled and the raw user text starts with a "remember
+        // /save this" trigger. The hybrid grace+detach contract bounds the
+        // awaited delay; pre-wrapped prompts skip ingest to avoid
+        // double-ingest on retries.
+        await this.deps.memoryIngester.ingest(input.text);
         // Apply the shared memory-context envelope to the runtime-bound text.
         // The background task summary above keeps using raw `input.text` so
         // operator-visible task titles do not leak retrieved memory blocks.
