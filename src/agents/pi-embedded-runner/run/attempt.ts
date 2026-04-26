@@ -14,6 +14,7 @@ import { formatErrorMessage } from "../../../infra/errors.js";
 import { resolveHeartbeatSummaryForAgent } from "../../../infra/heartbeat-summary.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
+import { createMemoryContextInjector } from "../../../memory/memory-context-injection.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
 import { resolveToolCallArgumentsEncoding } from "../../../plugins/provider-model-compat.js";
 import {
@@ -2286,9 +2287,19 @@ export async function runEmbeddedAttempt(
             if (normalizedReplayMessages !== activeSession.messages) {
               activeSession.agent.state.messages = normalizedReplayMessages;
             }
-            finalPromptText = effectivePrompt;
+            // Late-bind memory context: retrieval query is the raw user
+            // prompt; the wrap target is the fully layered effectivePrompt
+            // (bootstrap warning, plugin prepends, orphan-merge marker, etc).
+            // The injector is idempotent, so already-wrapped prompts pass
+            // through unchanged.
+            const memoryInjector = params.memoryInjector ?? createMemoryContextInjector();
+            const submittedPrompt = await memoryInjector.inject({
+              promptToWrap: effectivePrompt,
+              query: params.prompt,
+            });
+            finalPromptText = submittedPrompt;
             trajectoryRecorder?.recordEvent("prompt.submitted", {
-              prompt: effectivePrompt,
+              prompt: submittedPrompt,
               systemPrompt: systemPromptText,
               messages: activeSession.messages,
               imagesCount: imageResult.images.length,
@@ -2297,17 +2308,17 @@ export async function runEmbeddedAttempt(
             updateActiveEmbeddedRunSnapshot(params.sessionId, {
               transcriptLeafId,
               messages: btwSnapshotMessages,
-              inFlightPrompt: effectivePrompt,
+              inFlightPrompt: submittedPrompt,
             });
 
             // Only pass images option if there are actually images to pass
             // This avoids potential issues with models that don't expect the images parameter
             if (imageResult.images.length > 0) {
               await abortable(
-                activeSession.prompt(effectivePrompt, { images: imageResult.images }),
+                activeSession.prompt(submittedPrompt, { images: imageResult.images }),
               );
             } else {
-              await abortable(activeSession.prompt(effectivePrompt));
+              await abortable(activeSession.prompt(submittedPrompt));
             }
           }
         } catch (err) {

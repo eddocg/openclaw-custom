@@ -688,7 +688,11 @@ export class AcpGatewayAgent implements Agent {
     const attachments = extractAttachmentsFromPrompt(params.prompt);
     const prefixCwd = meta.prefixCwd ?? this.opts.prefixCwd ?? true;
     const displayCwd = shortenHomePath(session.cwd);
-    const message = prefixCwd ? `[Working directory: ${displayCwd}]\n\n${userText}` : userText;
+    const cwdPrefix = prefixCwd ? `[Working directory: ${displayCwd}]\n\n` : "";
+    // Memory-context injection happens downstream at the embedded-runner and
+    // AcpSessionManager.runTurn seams so all runtime paths share a single
+    // wrap. See src/memory/memory-context-injection.ts.
+    const message = `${cwdPrefix}${userText}`;
     const provenanceMode = this.opts.provenanceMode ?? "off";
     const systemInputProvenance =
       provenanceMode === "off" ? undefined : buildSystemInputProvenance(params.sessionId);

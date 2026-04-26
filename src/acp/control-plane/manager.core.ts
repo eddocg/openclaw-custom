@@ -722,6 +722,14 @@ export class AcpSessionManager {
         if (taskContext) {
           this.createBackgroundTaskRecord(taskContext, turnStartedAt);
         }
+        // Apply the shared memory-context envelope to the runtime-bound text.
+        // The background task summary above keeps using raw `input.text` so
+        // operator-visible task titles do not leak retrieved memory blocks.
+        // The injector is idempotent: pre-wrapped input passes through.
+        const effectiveText = await this.deps.memoryInjector.inject({
+          promptToWrap: input.text,
+          query: input.text,
+        });
         let taskProgressSummary = "";
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const resolution = this.resolveSession({
@@ -789,7 +797,7 @@ export class AcpSessionManager {
             const turnPromise = (async () => {
               for await (const event of runtime.runTurn({
                 handle,
-                text: input.text,
+                text: effectiveText,
                 attachments: input.attachments,
                 mode: input.mode,
                 requestId: input.requestId,
