@@ -119,7 +119,7 @@ describe("AcpSessionManager.runTurn memory-context injection", () => {
     const adapter: MemoryContextAdapter = {
       resolveContext: vi.fn(async () => "remembered fact"),
     };
-    const memoryInjector = createMemoryContextInjector({ adapter });
+    const memoryInjector = createMemoryContextInjector({ adapter, canonical: () => "" });
 
     const manager = new AcpSessionManager({ ...DEFAULT_DEPS, memoryInjector });
 
@@ -136,7 +136,7 @@ describe("AcpSessionManager.runTurn memory-context injection", () => {
     expect(runTurn).toHaveBeenCalledTimes(1);
     const forwarded = runTurn.mock.calls[0]?.[0] as { text: string } | undefined;
     expect(forwarded?.text).toBe(
-      "<memory_context>\nremembered fact\n</memory_context>\n\n<user_request>\nwhat is foo?\n</user_request>",
+      "<memory_context>\n<semantic_memory>\nremembered fact\n</semantic_memory>\n</memory_context>\n\n<user_request>\nwhat is foo?\n</user_request>",
     );
   });
 
@@ -147,7 +147,7 @@ describe("AcpSessionManager.runTurn memory-context injection", () => {
     const adapter: MemoryContextAdapter = {
       resolveContext: vi.fn(async () => ""),
     };
-    const memoryInjector = createMemoryContextInjector({ adapter });
+    const memoryInjector = createMemoryContextInjector({ adapter, canonical: () => "" });
 
     const manager = new AcpSessionManager({ ...DEFAULT_DEPS, memoryInjector });
 
@@ -171,7 +171,7 @@ describe("AcpSessionManager.runTurn memory-context injection", () => {
     const adapter: MemoryContextAdapter = {
       resolveContext: vi.fn(async () => "should-not-run"),
     };
-    const memoryInjector = createMemoryContextInjector({ adapter });
+    const memoryInjector = createMemoryContextInjector({ adapter, canonical: () => "" });
 
     const manager = new AcpSessionManager({ ...DEFAULT_DEPS, memoryInjector });
 
@@ -200,7 +200,7 @@ describe("AcpSessionManager.runTurn memory-context injection", () => {
         throw new MemoryContextError("memory CLI exited 2: boom");
       }),
     };
-    const memoryInjector = createMemoryContextInjector({ adapter });
+    const memoryInjector = createMemoryContextInjector({ adapter, canonical: () => "" });
 
     const manager = new AcpSessionManager({ ...DEFAULT_DEPS, memoryInjector });
 
