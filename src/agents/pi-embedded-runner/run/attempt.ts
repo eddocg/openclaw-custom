@@ -14,6 +14,7 @@ import { formatErrorMessage } from "../../../infra/errors.js";
 import { resolveHeartbeatSummaryForAgent } from "../../../infra/heartbeat-summary.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
+import { createMemoryCandidateQueueAdapter } from "../../../memory/memory-candidate-queue-adapter.js";
 import { createMemoryContextInjector } from "../../../memory/memory-context-injection.js";
 import { createMemoryIngestAdapter } from "../../../memory/memory-ingest-adapter.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
@@ -482,6 +483,44 @@ export async function runEmbeddedAttempt(
   if (memoryIngestDebug) {
     log.info(
       `[memory-ingest] seam=embedded-attempt ingest-result status=${memoryIngestResult.status} reason=${memoryIngestResult.reason ?? "none"}`,
+    );
+  }
+
+  // Best-effort candidate-queue enqueue. Parallel to the semantic ingest
+  // adapter above, but reacts only to the explicit `queue memory:` trigger
+  // and forwards to the channel-agnostic candidate queue CLI. Fails open and
+  // is fully decoupled from the existing semantic write path.
+  const memoryCandidateQueueLogBridge = (msg: string): void => {
+    if (msg.startsWith("[memory-candidate-queue]")) {
+      log.info(msg);
+    } else {
+      log.debug(msg);
+    }
+  };
+  const memoryCandidateQueue =
+    params.memoryCandidateQueue ??
+    createMemoryCandidateQueueAdapter({ log: memoryCandidateQueueLogBridge });
+  if (memoryIngestDebug) {
+    log.info("[memory-candidate-queue] seam=embedded-attempt enqueue-start");
+  }
+  const candidateQueueSource =
+    params.messageProvider?.trim() ||
+    params.messageChannel?.trim() ||
+    "runtime";
+  const candidateQueueMessageId =
+    params.currentMessageId !== undefined && params.currentMessageId !== null
+      ? String(params.currentMessageId)
+      : undefined;
+  const candidateQueueResult = await memoryCandidateQueue.enqueue(params.prompt, {
+    source: candidateQueueSource,
+    sessionKey: params.sessionKey ?? params.sessionId,
+    requestId: params.runId,
+    provider: params.messageProvider,
+    ...(candidateQueueMessageId !== undefined ? { messageId: candidateQueueMessageId } : {}),
+  });
+  if (memoryIngestDebug) {
+    log.info(
+      `[memory-candidate-queue] seam=embedded-attempt enqueue-result status=${candidateQueueResult.status} reason=${candidateQueueResult.reason ?? "none"}`,
     );
   }
 

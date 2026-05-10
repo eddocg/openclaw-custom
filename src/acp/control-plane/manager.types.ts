@@ -7,6 +7,10 @@ import type {
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import {
+  createMemoryCandidateQueueAdapter,
+  type MemoryCandidateQueueAdapter,
+} from "../../memory/memory-candidate-queue-adapter.js";
+import {
   createMemoryContextInjector,
   type MemoryContextInjector,
 } from "../../memory/memory-context-injection.js";
@@ -162,6 +166,14 @@ export type AcpSessionManagerDeps = {
    * `OPENCLAW_MEMORY_ENABLED` is true.
    */
   memoryIngester: MemoryIngestAdapter;
+  /**
+   * Channel-agnostic candidate queue adapter. Parallel to the semantic
+   * ingest adapter above; reacts only to the explicit `queue memory:`
+   * trigger and forwards each candidate to the
+   * `openclaw_memory_core.integration.memory_candidate_queue_cli`. Defaults
+   * to a fail-open adapter gated by `OPENCLAW_MEMORY_CANDIDATE_QUEUE_ENABLED`.
+   */
+  memoryCandidateQueue: MemoryCandidateQueueAdapter;
 };
 
 /**
@@ -194,6 +206,19 @@ function defaultMemoryIngesterLog(msg: string): void {
   }
 }
 
+/**
+ * Bridge candidate-queue breadcrumbs into the same dedicated ACP subsystem
+ * logger. Prefixed `[memory-candidate-queue]` lines reach the file at INFO;
+ * operational summaries stay on `debug`.
+ */
+function defaultMemoryCandidateQueueLog(msg: string): void {
+  if (msg.startsWith("[memory-candidate-queue]")) {
+    acpMemoryIngestLog.info(msg);
+  } else {
+    acpMemoryIngestLog.debug(msg);
+  }
+}
+
 export const DEFAULT_DEPS: AcpSessionManagerDeps = {
   listAcpSessions: listAcpSessionEntries,
   readSessionEntry: readAcpSessionEntry,
@@ -202,6 +227,9 @@ export const DEFAULT_DEPS: AcpSessionManagerDeps = {
   requireRuntimeBackend: requireAcpRuntimeBackend,
   memoryInjector: createMemoryContextInjector(),
   memoryIngester: createMemoryIngestAdapter({ log: defaultMemoryIngesterLog }),
+  memoryCandidateQueue: createMemoryCandidateQueueAdapter({
+    log: defaultMemoryCandidateQueueLog,
+  }),
 };
 
 export type { AcpSessionRuntimeOptions, SessionAcpMeta, SessionEntry };
