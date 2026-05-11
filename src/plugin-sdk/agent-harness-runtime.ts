@@ -126,6 +126,7 @@ export { resolveSandboxContext } from "../agents/sandbox.js";
 export { resolveBootstrapContextForRun } from "../agents/bootstrap-files.js";
 export {
   createMemoryCandidateQueueAdapter,
+  findQueueTrigger,
   type MemoryCandidateQueueAdapter,
   type MemoryCandidateQueueContext,
   type MemoryCandidateQueueResult,

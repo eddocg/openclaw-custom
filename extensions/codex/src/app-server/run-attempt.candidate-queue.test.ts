@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
   createMemoryCandidateQueueAdapter,
+  findQueueTrigger,
   type EmbeddedRunAttemptParams,
   type MemoryCandidateQueueAdapter,
   type MemoryCandidateQueueResult,
@@ -20,8 +21,9 @@ const SOURCE_FILE = fileURLToPath(new URL("./run-attempt.ts", import.meta.url));
  *   - the adapter factory is sourced through the shared SDK barrel
  *     (`openclaw/plugin-sdk/agent-harness-runtime`) so the Codex extension
  *     never reaches into `src/memory/**` directly,
- *   - the adapter is awaited with the raw `params.prompt` near attempt
- *     start, before any heavy app-server / context-engine work,
+ *   - the prompt is trigger-checked before enqueue and short-circuits with a
+ *     deterministic acknowledgement before any heavy app-server /
+ *     context-engine work,
  *   - the adapter is reused via `params.memoryCandidateQueue ??` so tests can
  *     inject a fake without touching the SDK,
  *   - the breadcrumb identifies the seam as `codex-app-server`,
@@ -35,29 +37,54 @@ describe("runCodexAppServerAttempt memory-candidate-queue wiring", () => {
       "openclaw/plugin-sdk/agent-harness-runtime",
     );
     expect(source).toMatch(/createMemoryCandidateQueueAdapter,/);
+    expect(source).toMatch(/findQueueTrigger,/);
     expect(source).not.toMatch(/from ["'].*src\/memory\/memory-candidate-queue-adapter/);
     expect(source).not.toMatch(/from ["'].*\.\.\/memory\/memory-candidate-queue-adapter/);
   });
 
-  it("invokes the candidate queue at attempt start, before client/plugin/context work", async () => {
+  it("trigger-checks and short-circuits at attempt start, before client/plugin/context work", async () => {
     const source = await readFile(SOURCE_FILE, "utf8");
 
     expect(source).toContain("params.memoryCandidateQueue ??");
     expect(source).toContain("createMemoryCandidateQueueAdapter(");
+    expect(source).toContain("findQueueTrigger(params.prompt)");
+    expect(source).toContain("return buildCodexCandidateQueueAckResult({");
 
     const enqueueCalls = source.match(/memoryCandidateQueue\.enqueue\(\s*params\.prompt\b/g) ?? [];
     expect(enqueueCalls.length).toBe(1);
 
     const enqueueIdx = source.indexOf(
-      "await enqueueCodexAppServerCandidateQueue({ params });",
+      "const candidateQueueOutcome = await enqueueCodexAppServerCandidateQueue({ params });",
     );
+    const ackIdx = source.indexOf("return buildCodexCandidateQueueAckResult({");
     const clientFactoryIdx = source.indexOf("resolveCodexAppServerClientFactory()");
     const turnStartIdx = source.indexOf('"turn/start"');
     expect(enqueueIdx).toBeGreaterThan(-1);
+    expect(ackIdx).toBeGreaterThan(enqueueIdx);
     expect(clientFactoryIdx).toBeGreaterThan(-1);
     expect(turnStartIdx).toBeGreaterThan(-1);
     expect(enqueueIdx).toBeLessThan(clientFactoryIdx);
+    expect(ackIdx).toBeLessThan(clientFactoryIdx);
     expect(enqueueIdx).toBeLessThan(turnStartIdx);
+  });
+
+  it("returns the deterministic queue acknowledgement instead of exposing the prompt to tools", async () => {
+    const source = await readFile(SOURCE_FILE, "utf8");
+
+    expect(source).toContain(
+      'const CODEX_MEMORY_CANDIDATE_QUEUE_ACK = "Queued memory candidate for review."',
+    );
+    expect(source).toContain("assistantTexts: [text]");
+    expect(source).toContain("didSendViaMessagingTool: false");
+    expect(source).toContain("messagingToolSentTexts: []");
+    expect(source).toMatch(/if\s*\(\s*candidateQueueOutcome\.matched\s*\)\s*\{[\s\S]*?return buildCodexCandidateQueueAckResult/);
+  });
+
+  it("keeps strict-mode queue failures visible instead of silently acknowledging", async () => {
+    const source = await readFile(SOURCE_FILE, "utf8");
+
+    expect(source).toContain("isCodexMemoryCandidateQueueStrictEnabled(process.env)");
+    expect(source).toMatch(/if\s*\(\s*isCodexMemoryCandidateQueueStrictEnabled\(process\.env\)\s*\)\s*\{\s*throw error;\s*\}/);
   });
 
   it("does not reach back into the existing PI/ACP candidate queue seams", async () => {
@@ -100,7 +127,7 @@ describe("runCodexAppServerAttempt memory-candidate-queue wiring", () => {
     expect(source).not.toMatch(/process\.env\.\w*DSN/);
   });
 
-  it("wraps the await in a try/catch so adapter throws cannot abort the attempt", async () => {
+  it("wraps non-strict adapter throws so explicit queue commands still bypass the model", async () => {
     const source = await readFile(SOURCE_FILE, "utf8");
     const helperStart = source.indexOf("async function enqueueCodexAppServerCandidateQueue");
     expect(helperStart).toBeGreaterThan(-1);
@@ -125,6 +152,11 @@ describe("runCodexAppServerAttempt candidate-queue env contract", () => {
     expect(typeof adapter.enqueue).toBe("function");
     const result: MemoryCandidateQueueResult = await adapter.enqueue("hello", {});
     expect(result.status).toBe("skipped:disabled");
+  });
+
+  it("findQueueTrigger exports the shared explicit queue trigger predicate through the SDK barrel", () => {
+    expect(findQueueTrigger("queue memory: hello")).toEqual({ index: 0 });
+    expect(findQueueTrigger("please queue memory: hello")).toBeNull();
   });
 
   it("forwards full env (including OPENCLAW_MEMORY_CORE_DSN) to the spawned subprocess without logging it", async () => {

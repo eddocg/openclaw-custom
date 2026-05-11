@@ -13,6 +13,7 @@ import {
   embeddedAgentLog,
   emitAgentEvent as emitGlobalAgentEvent,
   finalizeHarnessContextEngineTurn,
+  findQueueTrigger,
   formatErrorMessage,
   isActiveHarnessContextEngine,
   isSubagentSessionKey,
@@ -36,6 +37,7 @@ import {
   type EmbeddedRunAttemptParams,
   type EmbeddedRunAttemptResult,
   type EmbeddedContextFile,
+  type MemoryCandidateQueueResult,
   type NativeHookRelayEvent,
   type NativeHookRelayRegistrationHandle,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
@@ -141,6 +143,8 @@ const CODEX_TURN_TERMINAL_IDLE_TIMEOUT_MS = 30 * 60_000;
 const CODEX_NATIVE_HOOK_RELAY_MIN_TTL_MS = 30 * 60_000;
 const CODEX_NATIVE_HOOK_RELAY_TTL_GRACE_MS = 5 * 60_000;
 const CODEX_STEER_ALL_DEBOUNCE_MS = 500;
+const CODEX_MEMORY_CANDIDATE_QUEUE_ACK = "Queued memory candidate for review.";
+const CODEX_MEMORY_CANDIDATE_QUEUE_DISABLED_ACK = "Memory candidate queue is disabled.";
 const LOG_FIELD_MAX_LENGTH = 160;
 const CODEX_NATIVE_PROJECT_DOC_BASENAMES = new Set(["agents.md"]);
 const CODEX_NATIVE_HOOK_RELAY_EVENTS_WITH_APP_SERVER_APPROVALS =
@@ -213,6 +217,15 @@ function isCodexMemoryCandidateQueueDebugEnabled(env: NodeJS.ProcessEnv): boolea
   return lower === "true" || lower === "1" || lower === "yes" || lower === "on";
 }
 
+function isCodexMemoryCandidateQueueStrictEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.OPENCLAW_MEMORY_CANDIDATE_QUEUE_STRICT;
+  if (typeof raw !== "string") {
+    return false;
+  }
+  const lower = raw.trim().toLowerCase();
+  return lower === "true" || lower === "1" || lower === "yes" || lower === "on";
+}
+
 // Prefix router: keep `[memory-candidate-queue]` breadcrumbs at INFO on the
 // embedded agent log so adapter breadcrumbs reach the gateway log file at the
 // default file log level when OPENCLAW_MEMORY_DEBUG=true. Operational failure
@@ -228,10 +241,20 @@ function memoryCandidateQueueLogBridge(msg: string): void {
   }
 }
 
+type CodexAppServerCandidateQueueOutcome = {
+  matched: boolean;
+  result?: MemoryCandidateQueueResult;
+  error?: unknown;
+};
+
 async function enqueueCodexAppServerCandidateQueue(input: {
   params: EmbeddedRunAttemptParams;
-}): Promise<void> {
+}): Promise<CodexAppServerCandidateQueueOutcome> {
   const { params } = input;
+  const explicitQueueTrigger = findQueueTrigger(params.prompt);
+  if (!explicitQueueTrigger) {
+    return { matched: false };
+  }
   const memoryCandidateQueue =
     params.memoryCandidateQueue ??
     createMemoryCandidateQueueAdapter({ log: memoryCandidateQueueLogBridge });
@@ -258,17 +281,98 @@ async function enqueueCodexAppServerCandidateQueue(input: {
         `[memory-candidate-queue] seam=codex-app-server enqueue-result status=${result.status} reason=${result.reason ?? "none"}`,
       );
     }
+    return { matched: true, result };
   } catch (error) {
     // The adapter is fail-open by default; only OPENCLAW_MEMORY_CANDIDATE_QUEUE_STRICT
-    // promotes failures to throws. Codex never opts into strict so we swallow
-    // here as a last-resort guard against unexpected adapter exceptions.
+    // promotes failures to throws. In that mode keep the failure visible;
+    // otherwise still short-circuit the model/tool layer so an explicit queue
+    // command can never mutate canonical MEMORY.md directly.
+    if (isCodexMemoryCandidateQueueStrictEnabled(process.env)) {
+      throw error;
+    }
     embeddedAgentLog.debug("codex app-server candidate queue enqueue threw", { error });
     if (debugEnabled) {
       embeddedAgentLog.info(
         `[memory-candidate-queue] seam=codex-app-server enqueue-result status=failed reason=${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    return { matched: true, error };
   }
+}
+
+function buildCodexCandidateQueueAckResult(params: {
+  attempt: EmbeddedRunAttemptParams;
+  outcome: CodexAppServerCandidateQueueOutcome;
+}): EmbeddedRunAttemptResult {
+  const text =
+    params.outcome.result?.status === "skipped:disabled"
+      ? CODEX_MEMORY_CANDIDATE_QUEUE_DISABLED_ACK
+      : CODEX_MEMORY_CANDIDATE_QUEUE_ACK;
+  const timestamp = Date.now();
+  const zeroUsage = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 0,
+    },
+  };
+  const assistant = {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    api: params.attempt.model.api ?? "openai-codex-responses",
+    provider: params.attempt.provider,
+    model: params.attempt.modelId,
+    usage: zeroUsage,
+    stopReason: "stop",
+    timestamp,
+  } as EmbeddedRunAttemptResult["lastAssistant"];
+  return {
+    aborted: false,
+    externalAbort: false,
+    timedOut: false,
+    idleTimedOut: false,
+    timedOutDuringCompaction: false,
+    timedOutDuringToolExecution: false,
+    promptError: null,
+    promptErrorSource: null,
+    sessionIdUsed: params.attempt.sessionId,
+    bootstrapPromptWarningSignaturesSeen: params.attempt.bootstrapPromptWarningSignaturesSeen,
+    bootstrapPromptWarningSignature: params.attempt.bootstrapPromptWarningSignature,
+    messagesSnapshot: [
+      {
+        role: "user",
+        content: params.attempt.prompt,
+        timestamp,
+      },
+      assistant,
+    ] as AgentMessage[],
+    assistantTexts: [text],
+    toolMetas: [],
+    lastAssistant: assistant,
+    currentAttemptAssistant: assistant,
+    didSendViaMessagingTool: false,
+    messagingToolSentTexts: [],
+    messagingToolSentMediaUrls: [],
+    messagingToolSentTargets: [],
+    cloudCodeAssistFormatError: false,
+    replayMetadata: {
+      hadPotentialSideEffects: false,
+      replaySafe: true,
+    },
+    itemLifecycle: {
+      startedCount: 0,
+      completedCount: 0,
+      activeCount: 0,
+    },
+    yieldDetected: false,
+  };
 }
 
 type CodexSteeringQueueOptions = {
@@ -513,7 +617,13 @@ export async function runCodexAppServerAttempt(
   // and fully decoupled from the semantic memory write path. The adapter is
   // fail-open; both the await and the surrounding bridge swallow errors so a
   // queue failure can never abort the Codex turn.
-  await enqueueCodexAppServerCandidateQueue({ params });
+  const candidateQueueOutcome = await enqueueCodexAppServerCandidateQueue({ params });
+  if (candidateQueueOutcome.matched) {
+    return buildCodexCandidateQueueAckResult({
+      attempt: params,
+      outcome: candidateQueueOutcome,
+    });
+  }
   const attemptClientFactory = resolveCodexAppServerClientFactory();
   const pluginConfig = readCodexPluginConfig(options.pluginConfig);
   const appServer = resolveCodexAppServerRuntimeOptions({ pluginConfig });
