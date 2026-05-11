@@ -9,6 +9,7 @@ import {
   buildHarnessContextEngineRuntimeContextFromUsage,
   buildEmbeddedAttemptToolRunContext,
   clearActiveEmbeddedRun,
+  createMemoryCandidateQueueAdapter,
   embeddedAgentLog,
   emitAgentEvent as emitGlobalAgentEvent,
   finalizeHarnessContextEngineTurn,
@@ -201,6 +202,73 @@ function emitCodexAppServerEvent(
 
 function collectTerminalAssistantText(result: EmbeddedRunAttemptResult): string {
   return result.assistantTexts.join("\n\n").trim();
+}
+
+function isCodexMemoryCandidateQueueDebugEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.OPENCLAW_MEMORY_DEBUG;
+  if (typeof raw !== "string") {
+    return false;
+  }
+  const lower = raw.trim().toLowerCase();
+  return lower === "true" || lower === "1" || lower === "yes" || lower === "on";
+}
+
+// Prefix router: keep `[memory-candidate-queue]` breadcrumbs at INFO on the
+// embedded agent log so adapter breadcrumbs reach the gateway log file at the
+// default file log level when OPENCLAW_MEMORY_DEBUG=true. Operational failure
+// summaries (without the prefix) stay on DEBUG so the adapter never widens
+// the surface area of normal Codex turn logging. The adapter itself gates
+// breadcrumbs on OPENCLAW_MEMORY_DEBUG=true; this bridge only chooses the
+// sink. Mirrors the embedded-runner candidate-queue bridge.
+function memoryCandidateQueueLogBridge(msg: string): void {
+  if (msg.startsWith("[memory-candidate-queue]")) {
+    embeddedAgentLog.info(msg);
+  } else {
+    embeddedAgentLog.debug(msg);
+  }
+}
+
+async function enqueueCodexAppServerCandidateQueue(input: {
+  params: EmbeddedRunAttemptParams;
+}): Promise<void> {
+  const { params } = input;
+  const memoryCandidateQueue =
+    params.memoryCandidateQueue ??
+    createMemoryCandidateQueueAdapter({ log: memoryCandidateQueueLogBridge });
+  const debugEnabled = isCodexMemoryCandidateQueueDebugEnabled(process.env);
+  if (debugEnabled) {
+    embeddedAgentLog.info("[memory-candidate-queue] seam=codex-app-server enqueue-start");
+  }
+  const candidateQueueSource =
+    params.messageProvider?.trim() || params.messageChannel?.trim() || "codex-app-server";
+  const candidateQueueMessageId =
+    params.currentMessageId !== undefined && params.currentMessageId !== null
+      ? String(params.currentMessageId)
+      : undefined;
+  try {
+    const result = await memoryCandidateQueue.enqueue(params.prompt, {
+      source: candidateQueueSource,
+      sessionKey: params.sessionKey ?? params.sessionId,
+      requestId: params.runId,
+      provider: params.messageProvider,
+      ...(candidateQueueMessageId !== undefined ? { messageId: candidateQueueMessageId } : {}),
+    });
+    if (debugEnabled) {
+      embeddedAgentLog.info(
+        `[memory-candidate-queue] seam=codex-app-server enqueue-result status=${result.status} reason=${result.reason ?? "none"}`,
+      );
+    }
+  } catch (error) {
+    // The adapter is fail-open by default; only OPENCLAW_MEMORY_CANDIDATE_QUEUE_STRICT
+    // promotes failures to throws. Codex never opts into strict so we swallow
+    // here as a last-resort guard against unexpected adapter exceptions.
+    embeddedAgentLog.debug("codex app-server candidate queue enqueue threw", { error });
+    if (debugEnabled) {
+      embeddedAgentLog.info(
+        `[memory-candidate-queue] seam=codex-app-server enqueue-result status=failed reason=${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
 }
 
 type CodexSteeringQueueOptions = {
@@ -439,6 +507,13 @@ export async function runCodexAppServerAttempt(
   } = {},
 ): Promise<EmbeddedRunAttemptResult> {
   const attemptStartedAt = Date.now();
+  // Best-effort candidate-queue enqueue. Mirrors the shared embedded-runner
+  // and ACP seams: reacts only to the explicit `queue memory:` trigger in
+  // raw inbound user text, gated by OPENCLAW_MEMORY_CANDIDATE_QUEUE_ENABLED,
+  // and fully decoupled from the semantic memory write path. The adapter is
+  // fail-open; both the await and the surrounding bridge swallow errors so a
+  // queue failure can never abort the Codex turn.
+  await enqueueCodexAppServerCandidateQueue({ params });
   const attemptClientFactory = resolveCodexAppServerClientFactory();
   const pluginConfig = readCodexPluginConfig(options.pluginConfig);
   const appServer = resolveCodexAppServerRuntimeOptions({ pluginConfig });

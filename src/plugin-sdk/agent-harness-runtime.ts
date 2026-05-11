@@ -124,6 +124,12 @@ export {
 export { normalizeProviderToolSchemas } from "../agents/pi-embedded-runner/tool-schema-runtime.js";
 export { resolveSandboxContext } from "../agents/sandbox.js";
 export { resolveBootstrapContextForRun } from "../agents/bootstrap-files.js";
+export {
+  createMemoryCandidateQueueAdapter,
+  type MemoryCandidateQueueAdapter,
+  type MemoryCandidateQueueContext,
+  type MemoryCandidateQueueResult,
+} from "../memory/memory-candidate-queue-adapter.js";
 export type { EmbeddedContextFile } from "../agents/pi-embedded-helpers/types.js";
 export { isSubagentSessionKey } from "../routing/session-key.js";
 export {
