@@ -12,6 +12,7 @@ import {
   ensurePairedTestGatewayClientIdentity,
   getFreeGatewayPort,
 } from "./gateway-cli-backend.live-helpers.js";
+import { restoreLiveEnv, snapshotLiveEnv, type LiveEnvSnapshot } from "./live-env-test-helpers.js";
 import { extractPayloadText } from "./test-helpers.agent-results.js";
 
 const LIVE = isLiveTestEnabled();
@@ -21,23 +22,7 @@ const describeLive = LIVE && CODEX_HARNESS_LIVE ? describe : describe.skip;
 const LIVE_TIMEOUT_MS = 420_000;
 const GATEWAY_CONNECT_TIMEOUT_MS = 60_000;
 const AGENT_REQUEST_TIMEOUT_MS = 180_000;
-const DEFAULT_CODEX_MODEL = "codex/gpt-5.4";
-
-type EnvSnapshot = {
-  agentRuntime?: string;
-  configPath?: string;
-  gatewayToken?: string;
-  openaiApiKey?: string;
-  openaiBaseUrl?: string;
-  skipBrowserControl?: string;
-  skipCanvas?: string;
-  skipChannels?: string;
-  skipCron?: string;
-  skipGmail?: string;
-  stateDir?: string;
-  trajectory?: string;
-  trajectoryDir?: string;
-};
+const DEFAULT_CODEX_MODEL = "openai/gpt-5.5";
 
 function logLiveStep(step: string, details?: Record<string, unknown>): void {
   if (!CODEX_HARNESS_DEBUG) {
@@ -47,46 +32,12 @@ function logLiveStep(step: string, details?: Record<string, unknown>): void {
   console.error(`[gateway-trajectory-live] ${step}${suffix}`);
 }
 
-function snapshotEnv(): EnvSnapshot {
-  return {
-    agentRuntime: process.env.OPENCLAW_AGENT_RUNTIME,
-    configPath: process.env.OPENCLAW_CONFIG_PATH,
-    gatewayToken: process.env.OPENCLAW_GATEWAY_TOKEN,
-    openaiApiKey: process.env.OPENAI_API_KEY,
-    openaiBaseUrl: process.env.OPENAI_BASE_URL,
-    skipBrowserControl: process.env.OPENCLAW_SKIP_BROWSER_CONTROL_SERVER,
-    skipCanvas: process.env.OPENCLAW_SKIP_CANVAS_HOST,
-    skipChannels: process.env.OPENCLAW_SKIP_CHANNELS,
-    skipCron: process.env.OPENCLAW_SKIP_CRON,
-    skipGmail: process.env.OPENCLAW_SKIP_GMAIL_WATCHER,
-    stateDir: process.env.OPENCLAW_STATE_DIR,
-    trajectory: process.env.OPENCLAW_TRAJECTORY,
-    trajectoryDir: process.env.OPENCLAW_TRAJECTORY_DIR,
-  };
+function snapshotEnv(): LiveEnvSnapshot {
+  return snapshotLiveEnv(["OPENCLAW_TRAJECTORY", "OPENCLAW_TRAJECTORY_DIR"]);
 }
 
-function restoreEnv(snapshot: EnvSnapshot): void {
-  restoreEnvVar("OPENCLAW_AGENT_RUNTIME", snapshot.agentRuntime);
-  restoreEnvVar("OPENCLAW_CONFIG_PATH", snapshot.configPath);
-  restoreEnvVar("OPENCLAW_GATEWAY_TOKEN", snapshot.gatewayToken);
-  restoreEnvVar("OPENAI_API_KEY", snapshot.openaiApiKey);
-  restoreEnvVar("OPENAI_BASE_URL", snapshot.openaiBaseUrl);
-  restoreEnvVar("OPENCLAW_SKIP_BROWSER_CONTROL_SERVER", snapshot.skipBrowserControl);
-  restoreEnvVar("OPENCLAW_SKIP_CANVAS_HOST", snapshot.skipCanvas);
-  restoreEnvVar("OPENCLAW_SKIP_CHANNELS", snapshot.skipChannels);
-  restoreEnvVar("OPENCLAW_SKIP_CRON", snapshot.skipCron);
-  restoreEnvVar("OPENCLAW_SKIP_GMAIL_WATCHER", snapshot.skipGmail);
-  restoreEnvVar("OPENCLAW_STATE_DIR", snapshot.stateDir);
-  restoreEnvVar("OPENCLAW_TRAJECTORY", snapshot.trajectory);
-  restoreEnvVar("OPENCLAW_TRAJECTORY_DIR", snapshot.trajectoryDir);
-}
-
-function restoreEnvVar(name: string, value: string | undefined): void {
-  if (value === undefined) {
-    delete process.env[name];
-    return;
-  }
-  process.env[name] = value;
+function restoreEnv(snapshot: LiveEnvSnapshot): void {
+  restoreLiveEnv(snapshot);
 }
 
 async function writeLiveGatewayConfig(params: {
@@ -107,7 +58,7 @@ async function writeLiveGatewayConfig(params: {
       list: [{ id: "dev", default: true }],
       defaults: {
         workspace: params.workspace,
-        embeddedHarness: { runtime: "codex", fallback: "none" },
+        agentRuntime: { id: "codex" },
         skipBootstrap: true,
         model: { primary: params.modelKey },
         models: { [params.modelKey]: {} },
@@ -187,6 +138,35 @@ async function waitForPath(filePath: string, timeoutMs = 60_000): Promise<void> 
   throw new Error(`timed out waiting for ${filePath}`);
 }
 
+async function approveTrajectoryExport(client: GatewayClient): Promise<string> {
+  const approvals = (await client.request(
+    "exec.approval.list",
+    {},
+    { timeoutMs: 10_000 },
+  )) as Array<{
+    id?: string;
+    request?: {
+      command?: string;
+    };
+  }>;
+  const approval = approvals.find((entry) =>
+    entry.request?.command?.includes("sessions export-trajectory"),
+  );
+  expect(approval).toMatchObject({
+    id: expect.any(String),
+    request: { command: expect.stringContaining("sessions export-trajectory") },
+  });
+  if (!approval?.id) {
+    throw new Error("expected trajectory export approval id");
+  }
+  await client.request(
+    "exec.approval.resolve",
+    { id: approval.id, decision: "allow-once" },
+    { timeoutMs: 10_000 },
+  );
+  return approval.id;
+}
+
 describeLive("gateway live trajectory export", () => {
   let cleanup: Array<() => Promise<void>> = [];
 
@@ -220,7 +200,6 @@ describeLive("gateway live trajectory export", () => {
 
       clearRuntimeConfigSnapshot();
       process.env.OPENCLAW_AGENT_RUNTIME = "codex";
-      process.env.OPENCLAW_AGENT_HARNESS_FALLBACK = "none";
       delete process.env.OPENAI_BASE_URL;
       delete process.env.OPENAI_API_KEY;
       process.env.OPENCLAW_CONFIG_PATH = configPath;
@@ -293,14 +272,18 @@ describeLive("gateway live trajectory export", () => {
           exportResponse?.status === "ok" ||
           exportResponse?.status === "started",
       ).toBe(true);
-      await waitForPath(path.join(bundleDir, "events.jsonl"), 60_000);
       const finalText =
         typeof exportResponse?.message === "object"
           ? extractFirstTextBlock(exportResponse.message)
           : undefined;
+      expect(finalText).toContain("Trajectory exports can include");
+      expect(finalText).toContain("through exec approval");
+      const approvalId = await approveTrajectoryExport(client);
+      logLiveStep("export:approved", { approvalId });
+      await waitForPath(path.join(bundleDir, "events.jsonl"), 60_000);
       logLiveStep("export:done", { finalText });
       if (finalText) {
-        expect(finalText).toContain("Trajectory exported!");
+        expect(finalText).toContain("Approve once");
       }
       expect(await listDirectoryNames(bundleDir)).toEqual(
         expect.arrayContaining([

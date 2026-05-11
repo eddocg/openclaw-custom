@@ -2,9 +2,9 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const rpcMock = vi.fn();
 
-vi.mock("openclaw/plugin-sdk/config-runtime", async () => {
-  const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/config-runtime")>(
-    "openclaw/plugin-sdk/config-runtime",
+vi.mock("openclaw/plugin-sdk/plugin-config-runtime", async () => {
+  const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/plugin-config-runtime")>(
+    "openclaw/plugin-sdk/plugin-config-runtime",
   );
   return {
     ...actual,
@@ -22,7 +22,7 @@ vi.mock("./accounts.js", () => ({
   }),
 }));
 
-vi.mock("./client.js", () => ({
+vi.mock("./client-adapter.js", () => ({
   signalRpcRequest: (...args: unknown[]) => rpcMock(...args),
 }));
 
@@ -53,8 +53,22 @@ describe("sendReactionSignal", () => {
       cfg: SIGNAL_TEST_CFG,
     });
 
+    expect(rpcMock).toHaveBeenCalledWith(
+      "sendReaction",
+      {
+        emoji: "🔥",
+        targetTimestamp: 123,
+        targetAuthor: "123e4567-e89b-12d3-a456-426614174000",
+        recipients: ["123e4567-e89b-12d3-a456-426614174000"],
+        account: "+15550001111",
+      },
+      {
+        baseUrl: "http://signal.local",
+        timeoutMs: undefined,
+        apiMode: undefined,
+      },
+    );
     const params = rpcMock.mock.calls[0]?.[1] as Record<string, unknown>;
-    expect(rpcMock).toHaveBeenCalledWith("sendReaction", expect.any(Object), expect.any(Object));
     expect(params.recipients).toEqual(["123e4567-e89b-12d3-a456-426614174000"]);
     expect(params.groupIds).toBeUndefined();
     expect(params.targetAuthor).toBe("123e4567-e89b-12d3-a456-426614174000");

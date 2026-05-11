@@ -22,7 +22,7 @@ export type InteractiveReplyTextBlock = {
   text: string;
 };
 
-export type InteractiveReplyButtonsBlock = {
+type InteractiveReplyButtonsBlock = {
   type: "buttons";
   buttons: InteractiveReplyButton[];
 };
@@ -46,17 +46,9 @@ export type MessagePresentationTone = "info" | "success" | "warning" | "danger" 
 
 export type MessagePresentationButtonStyle = InteractiveButtonStyle;
 
-export type MessagePresentationButton = {
-  label: string;
-  value?: string;
-  url?: string;
-  style?: MessagePresentationButtonStyle;
-};
+export type MessagePresentationButton = InteractiveReplyButton;
 
-export type MessagePresentationOption = {
-  label: string;
-  value: string;
-};
+export type MessagePresentationOption = InteractiveReplyOption;
 
 export type MessagePresentationTextBlock = {
   type: "text";
@@ -82,6 +74,10 @@ export type MessagePresentationSelectBlock = {
   placeholder?: string;
   options: MessagePresentationOption[];
 };
+
+export type MessagePresentationInteractiveBlock =
+  | MessagePresentationButtonsBlock
+  | MessagePresentationSelectBlock;
 
 export type MessagePresentationBlock =
   | MessagePresentationTextBlock
@@ -124,11 +120,18 @@ function normalizePresentationTone(value: unknown): MessagePresentationTone | un
     : undefined;
 }
 
-function normalizeInteractiveButton(raw: unknown): InteractiveReplyButton | undefined {
+function toRecord(raw: unknown): Record<string, unknown> | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return undefined;
   }
-  const record = raw as Record<string, unknown>;
+  return raw as Record<string, unknown>;
+}
+
+function normalizeButton(raw: unknown): InteractiveReplyButton | undefined {
+  const record = toRecord(raw);
+  if (!record) {
+    return undefined;
+  }
   const label = normalizeOptionalString(record.label) ?? normalizeOptionalString(record.text);
   const value =
     normalizeOptionalString(record.value) ??
@@ -146,11 +149,11 @@ function normalizeInteractiveButton(raw: unknown): InteractiveReplyButton | unde
   };
 }
 
-function normalizeInteractiveOption(raw: unknown): InteractiveReplyOption | undefined {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+function normalizeOption(raw: unknown): InteractiveReplyOption | undefined {
+  const record = toRecord(raw);
+  if (!record) {
     return undefined;
   }
-  const record = raw as Record<string, unknown>;
   const label = normalizeOptionalString(record.label) ?? normalizeOptionalString(record.text);
   const value = normalizeOptionalString(record.value);
   if (!label || !value) {
@@ -159,30 +162,28 @@ function normalizeInteractiveOption(raw: unknown): InteractiveReplyOption | unde
   return { label, value };
 }
 
+function normalizeList<T>(value: unknown, normalizeEntry: (entry: unknown) => T | undefined): T[] {
+  return Array.isArray(value)
+    ? value.map((entry) => normalizeEntry(entry)).filter((entry): entry is T => Boolean(entry))
+    : [];
+}
+
 function normalizeInteractiveBlock(raw: unknown): InteractiveReplyBlock | undefined {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+  const record = toRecord(raw);
+  if (!record) {
     return undefined;
   }
-  const record = raw as Record<string, unknown>;
   const type = normalizeOptionalLowercaseString(record.type);
   if (type === "text") {
     const text = normalizeOptionalString(record.text);
     return text ? { type: "text", text } : undefined;
   }
   if (type === "buttons") {
-    const buttons = Array.isArray(record.buttons)
-      ? record.buttons
-          .map((entry) => normalizeInteractiveButton(entry))
-          .filter((entry): entry is InteractiveReplyButton => Boolean(entry))
-      : [];
+    const buttons = normalizeList(record.buttons, normalizeButton);
     return buttons.length > 0 ? { type: "buttons", buttons } : undefined;
   }
   if (type === "select") {
-    const options = Array.isArray(record.options)
-      ? record.options
-          .map((entry) => normalizeInteractiveOption(entry))
-          .filter((entry): entry is InteractiveReplyOption => Boolean(entry))
-      : [];
+    const options = normalizeList(record.options, normalizeOption);
     return options.length > 0
       ? {
           type: "select",
@@ -195,50 +196,19 @@ function normalizeInteractiveBlock(raw: unknown): InteractiveReplyBlock | undefi
 }
 
 export function normalizeInteractiveReply(raw: unknown): InteractiveReply | undefined {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+  const record = toRecord(raw);
+  if (!record) {
     return undefined;
   }
-  const record = raw as Record<string, unknown>;
-  const blocks = Array.isArray(record.blocks)
-    ? record.blocks
-        .map((entry) => normalizeInteractiveBlock(entry))
-        .filter((entry): entry is InteractiveReplyBlock => Boolean(entry))
-    : [];
+  const blocks = normalizeList(record.blocks, normalizeInteractiveBlock);
   return blocks.length > 0 ? { blocks } : undefined;
 }
 
-function normalizePresentationButton(raw: unknown): MessagePresentationButton | undefined {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return undefined;
-  }
-  const record = raw as Record<string, unknown>;
-  const label = normalizeOptionalString(record.label) ?? normalizeOptionalString(record.text);
-  const value =
-    normalizeOptionalString(record.value) ??
-    normalizeOptionalString(record.callbackData) ??
-    normalizeOptionalString(record.callback_data);
-  const url = normalizeOptionalString(record.url);
-  if (!label || (!value && !url)) {
-    return undefined;
-  }
-  return {
-    label,
-    ...(value ? { value } : {}),
-    ...(url ? { url } : {}),
-    style: normalizeButtonStyle(record.style),
-  };
-}
-
-function normalizePresentationOption(raw: unknown): MessagePresentationOption | undefined {
-  const option = normalizeInteractiveOption(raw);
-  return option ? { label: option.label, value: option.value } : undefined;
-}
-
 function normalizePresentationBlock(raw: unknown): MessagePresentationBlock | undefined {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+  const record = toRecord(raw);
+  if (!record) {
     return undefined;
   }
-  const record = raw as Record<string, unknown>;
   const type = normalizeOptionalLowercaseString(record.type);
   if (type === "text" || type === "context") {
     const text = normalizeOptionalString(record.text);
@@ -248,19 +218,11 @@ function normalizePresentationBlock(raw: unknown): MessagePresentationBlock | un
     return { type: "divider" };
   }
   if (type === "buttons") {
-    const buttons = Array.isArray(record.buttons)
-      ? record.buttons
-          .map((entry) => normalizePresentationButton(entry))
-          .filter((entry): entry is MessagePresentationButton => Boolean(entry))
-      : [];
+    const buttons = normalizeList(record.buttons, normalizeButton);
     return buttons.length > 0 ? { type: "buttons", buttons } : undefined;
   }
   if (type === "select") {
-    const options = Array.isArray(record.options)
-      ? record.options
-          .map((entry) => normalizePresentationOption(entry))
-          .filter((entry): entry is MessagePresentationOption => Boolean(entry))
-      : [];
+    const options = normalizeList(record.options, normalizeOption);
     return options.length > 0
       ? {
           type: "select",
@@ -273,15 +235,11 @@ function normalizePresentationBlock(raw: unknown): MessagePresentationBlock | un
 }
 
 export function normalizeMessagePresentation(raw: unknown): MessagePresentation | undefined {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+  const record = toRecord(raw);
+  if (!record) {
     return undefined;
   }
-  const record = raw as Record<string, unknown>;
-  const blocks = Array.isArray(record.blocks)
-    ? record.blocks
-        .map((entry) => normalizePresentationBlock(entry))
-        .filter((entry): entry is MessagePresentationBlock => Boolean(entry))
-    : [];
+  const blocks = normalizeList(record.blocks, normalizePresentationBlock);
   const title = normalizeOptionalString(record.title);
   if (!title && blocks.length === 0) {
     return undefined;
@@ -345,6 +303,20 @@ export function presentationToInteractiveReply(
   return blocks.length > 0 ? { blocks } : undefined;
 }
 
+export function isMessagePresentationInteractiveBlock(
+  block: MessagePresentationBlock,
+): block is MessagePresentationInteractiveBlock {
+  return block.type === "buttons" || block.type === "select";
+}
+
+export function presentationToInteractiveControlsReply(
+  presentation: MessagePresentation,
+): InteractiveReply | undefined {
+  return presentationToInteractiveReply({
+    blocks: presentation.blocks.filter(isMessagePresentationInteractiveBlock),
+  });
+}
+
 export function interactiveReplyToPresentation(
   interactive: InteractiveReply,
 ): MessagePresentation | undefined {
@@ -366,6 +338,7 @@ export function interactiveReplyToPresentation(
 
 export function renderMessagePresentationFallbackText(params: {
   presentation?: MessagePresentation;
+  emptyFallback?: string | null;
   text?: string | null;
 }): string {
   const lines: string[] = [];
@@ -402,7 +375,8 @@ export function renderMessagePresentationFallbackText(params: {
       }
     }
   }
-  return lines.join("\n\n");
+  const rendered = lines.join("\n\n");
+  return rendered || normalizeOptionalString(params.emptyFallback) || "";
 }
 
 export function hasReplyChannelData(value: unknown): value is Record<string, unknown> {

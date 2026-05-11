@@ -19,6 +19,14 @@ const feedbackReflectionMockState = vi.hoisted(() => ({
   runFeedbackReflection: vi.fn(),
 }));
 
+vi.mock("./monitor-handler/message-handler.js", () => ({
+  createMSTeamsMessageHandler: () => async () => {},
+}));
+
+vi.mock("./monitor-handler/reaction-handler.js", () => ({
+  createMSTeamsReactionHandler: () => async () => {},
+}));
+
 vi.mock("./feedback-reflection.js", async () => {
   const actual = await vi.importActual<typeof import("./feedback-reflection.js")>(
     "./feedback-reflection.js",
@@ -122,7 +130,7 @@ function createFeedbackInvokeContext(params: {
 }
 
 async function expectFileMissing(filePath: string) {
-  await expect(access(filePath)).rejects.toThrow();
+  await expect(access(filePath)).rejects.toMatchObject({ code: "ENOENT" });
 }
 
 async function withFeedbackHandler(params: {

@@ -6,8 +6,6 @@ read_when:
 title: "Matrix push rules for quiet previews"
 ---
 
-# Matrix push rules for quiet previews
-
 When `channels.matrix.streaming` is `"quiet"`, OpenClaw edits a single preview event in place and marks the finalized edit with a custom content flag. Matrix clients notify on the final edit only if a per-user push rule matches that flag. This page is for operators who self-host Matrix and want to install that rule for each recipient account.
 
 If you only want stock Matrix notification behavior, use `streaming: "partial"` or leave streaming off. See [Matrix channel setup](/channels/matrix#streaming-previews).
@@ -133,6 +131,8 @@ New user-defined `override` rules are inserted ahead of default suppress rules, 
     No special `homeserver.yaml` change is required. If normal Matrix notifications already reach this user, the recipient token + `pushrules` call above is the main setup step.
 
     If you run Synapse behind a reverse proxy or workers, make sure `/_matrix/client/.../pushrules/` reaches Synapse correctly. Push delivery is handled by the main process or `synapse.app.pusher` / configured pusher workers — ensure those are healthy.
+
+    The rule uses the `event_property_is` push-rule condition (MSC3758, push rule v1.10), which was added to Synapse in 2023. Older Synapse releases accept the `PUT pushrules/...` call but silently never match the condition — upgrade Synapse if no notification arrives on a finalized preview edit.
 
   </Accordion>
 

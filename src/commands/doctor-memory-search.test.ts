@@ -21,8 +21,8 @@ const auditDreamingArtifacts = vi.hoisted(() => vi.fn());
 const auditShortTermPromotionArtifacts = vi.hoisted(() => vi.fn());
 const repairDreamingArtifacts = vi.hoisted(() => vi.fn());
 const repairShortTermPromotionArtifacts = vi.hoisted(() => vi.fn());
-const detectRootMemoryFiles = vi.hoisted(() => vi.fn());
-const migrateLegacyRootMemoryFile = vi.hoisted(() => vi.fn());
+const noteWorkspaceMemoryHealth = vi.hoisted(() => vi.fn(async () => undefined));
+const maybeRepairWorkspaceMemoryHealth = vi.hoisted(() => vi.fn(async () => undefined));
 
 vi.mock("../terminal/note.js", () => ({
   note,
@@ -89,8 +89,8 @@ vi.mock("./doctor-workspace.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./doctor-workspace.js")>();
   return {
     ...actual,
-    detectRootMemoryFiles,
-    migrateLegacyRootMemoryFile,
+    noteWorkspaceMemoryHealth,
+    maybeRepairWorkspaceMemoryHealth,
   };
 });
 
@@ -137,22 +137,8 @@ function resetMemoryRecallMocks() {
     rewroteStore: false,
     removedStaleLock: false,
   });
-  detectRootMemoryFiles.mockReset();
-  detectRootMemoryFiles.mockResolvedValue({
-    workspaceDir: "/tmp/agent-default/workspace",
-    canonicalPath: "/tmp/agent-default/workspace/MEMORY.md",
-    legacyPath: "/tmp/agent-default/workspace/memory.md",
-    canonicalExists: false,
-    legacyExists: false,
-  });
-  migrateLegacyRootMemoryFile.mockReset();
-  migrateLegacyRootMemoryFile.mockResolvedValue({
-    changed: false,
-    canonicalPath: "/tmp/agent-default/workspace/MEMORY.md",
-    legacyPath: "/tmp/agent-default/workspace/memory.md",
-    removedLegacy: false,
-    mergedLegacy: false,
-  });
+  noteWorkspaceMemoryHealth.mockClear();
+  maybeRepairWorkspaceMemoryHealth.mockClear();
 }
 
 describe("noteMemorySearchHealth", () => {
@@ -242,6 +228,24 @@ describe("noteMemorySearchHealth", () => {
     expect(note).not.toHaveBeenCalled();
   });
 
+  it("does not treat an inconclusive gateway timeout as local embeddings not ready", async () => {
+    resolveMemorySearchConfig.mockReturnValue({
+      provider: "local",
+      local: {},
+      remote: {},
+    });
+
+    await noteMemorySearchHealth(cfg, {
+      gatewayMemoryProbe: {
+        checked: false,
+        ready: false,
+        error: "gateway memory probe timed out: gateway timeout after 8000ms",
+      },
+    });
+
+    expect(note).not.toHaveBeenCalled();
+  });
+
   it("does not warn when local provider has an explicit hf: modelPath", async () => {
     resolveMemorySearchConfig.mockReturnValue({
       provider: "local",
@@ -263,6 +267,63 @@ describe("noteMemorySearchHealth", () => {
     });
 
     await noteMemorySearchHealth(cfg, {});
+
+    expect(resolveApiKeyForProvider).not.toHaveBeenCalled();
+    expect(checkQmdBinaryAvailability).not.toHaveBeenCalled();
+    expect(note).toHaveBeenCalledTimes(1);
+    expect(String(note.mock.calls[0]?.[0] ?? "")).toContain(
+      "No active memory plugin is registered",
+    );
+  });
+
+  it("does not warn when CLI backend resolution is missing but gateway memory probe is ready", async () => {
+    resolveActiveMemoryBackendConfig.mockReturnValue(null);
+    resolveMemorySearchConfig.mockReturnValue({
+      provider: "auto",
+      local: {},
+      remote: {},
+    });
+
+    await noteMemorySearchHealth(cfg, {
+      gatewayMemoryProbe: { checked: true, ready: true },
+    });
+
+    expect(resolveApiKeyForProvider).not.toHaveBeenCalled();
+    expect(checkQmdBinaryAvailability).not.toHaveBeenCalled();
+    expect(note).not.toHaveBeenCalled();
+  });
+
+  it("warns when CLI backend resolution is missing and gateway memory probe was skipped", async () => {
+    resolveActiveMemoryBackendConfig.mockReturnValue(null);
+    resolveMemorySearchConfig.mockReturnValue({
+      provider: "auto",
+      local: {},
+      remote: {},
+    });
+
+    await noteMemorySearchHealth(cfg, {
+      gatewayMemoryProbe: { checked: false, ready: false, skipped: true },
+    });
+
+    expect(resolveApiKeyForProvider).not.toHaveBeenCalled();
+    expect(checkQmdBinaryAvailability).not.toHaveBeenCalled();
+    expect(note).toHaveBeenCalledTimes(1);
+    expect(String(note.mock.calls[0]?.[0] ?? "")).toContain(
+      "No active memory plugin is registered",
+    );
+  });
+
+  it("warns when CLI backend resolution is missing and gateway memory probe is not ready", async () => {
+    resolveActiveMemoryBackendConfig.mockReturnValue(null);
+    resolveMemorySearchConfig.mockReturnValue({
+      provider: "auto",
+      local: {},
+      remote: {},
+    });
+
+    await noteMemorySearchHealth(cfg, {
+      gatewayMemoryProbe: { checked: true, ready: false, error: "memory search unavailable" },
+    });
 
     expect(resolveApiKeyForProvider).not.toHaveBeenCalled();
     expect(checkQmdBinaryAvailability).not.toHaveBeenCalled();
@@ -408,6 +469,37 @@ describe("noteMemorySearchHealth", () => {
     expect(note).not.toHaveBeenCalled();
   });
 
+  it("does not warn for ollama when gateway probe is ready without CLI API key", async () => {
+    resolveMemorySearchConfig.mockReturnValue({
+      provider: "ollama",
+      local: {},
+      remote: {},
+    });
+
+    await noteMemorySearchHealth(cfg, {
+      gatewayMemoryProbe: { checked: true, ready: true },
+    });
+
+    expect(note).not.toHaveBeenCalled();
+    expect(resolveApiKeyForProvider).not.toHaveBeenCalled();
+  });
+
+  it("warns for ollama when gateway probe reports embeddings are not ready", async () => {
+    resolveMemorySearchConfig.mockReturnValue({
+      provider: "ollama",
+      local: {},
+      remote: {},
+    });
+
+    await noteMemorySearchHealth(cfg, {
+      gatewayMemoryProbe: { checked: true, ready: false, error: "connection refused" },
+    });
+
+    const message = String(note.mock.calls[0]?.[0] ?? "");
+    expect(message).toContain('provider "ollama" is configured');
+    expect(message).toContain("embeddings are not ready");
+  });
+
   it("warns when lmstudio gateway probe reports embeddings are not ready", async () => {
     resolveMemorySearchConfig.mockReturnValue({
       provider: "lmstudio",
@@ -424,7 +516,12 @@ describe("noteMemorySearchHealth", () => {
     expect(message).toContain("embeddings are not ready");
   });
 
-  it("warns when lmstudio gateway probe is unavailable", async () => {
+  it("does not warn when key-optional provider (lmstudio) probe was skipped (skipped: true)", async () => {
+    // When `openclaw doctor` runs without --deep, the probe is skipped and returns
+    // { checked: false, ready: false, skipped: true }. This must NOT produce a
+    // false-positive warning — it means readiness was never checked, not that
+    // embeddings are unavailable.
+    // Regression test for: https://github.com/openclaw/openclaw/issues/74608
     resolveMemorySearchConfig.mockReturnValue({
       provider: "lmstudio",
       local: {},
@@ -432,13 +529,48 @@ describe("noteMemorySearchHealth", () => {
     });
 
     await noteMemorySearchHealth(cfg, {
-      gatewayMemoryProbe: { checked: false, ready: false },
+      gatewayMemoryProbe: { checked: false, ready: false, skipped: true },
+    });
+
+    expect(note).not.toHaveBeenCalled();
+  });
+
+  it("does not warn when key-optional provider (ollama) probe was skipped (skipped: true)", async () => {
+    // Same guard for ollama — the most commonly reported false-positive case.
+    resolveMemorySearchConfig.mockReturnValue({
+      provider: "ollama",
+      local: {},
+      remote: {},
+    });
+
+    await noteMemorySearchHealth(cfg, {
+      gatewayMemoryProbe: { checked: false, ready: false, skipped: true },
+    });
+
+    expect(note).not.toHaveBeenCalled();
+  });
+
+  it("warns for key-optional provider (lmstudio) when gateway probe timed out", async () => {
+    // A gateway timeout sets checked: false but skipped: false/absent. This is a
+    // real diagnostic signal — embeddings may be unavailable — so we should warn.
+    // Regression guard: https://github.com/openclaw/openclaw/issues/74608
+    resolveMemorySearchConfig.mockReturnValue({
+      provider: "lmstudio",
+      local: {},
+      remote: {},
+    });
+
+    await noteMemorySearchHealth(cfg, {
+      gatewayMemoryProbe: {
+        checked: false,
+        ready: false,
+        error: "gateway memory probe timed out: gateway timeout after 8000ms",
+        skipped: false,
+      },
     });
 
     const message = String(note.mock.calls[0]?.[0] ?? "");
     expect(message).toContain('provider "lmstudio" is configured');
-    expect(message).toContain("could not confirm embeddings are ready");
-    expect(message).toContain("openclaw memory status --deep");
   });
 
   it("notes when gateway probe reports embeddings ready and CLI API key is missing", async () => {
@@ -569,17 +701,10 @@ describe("noteMemorySearchHealth", () => {
       local: {},
       remote: {},
     });
-    detectRootMemoryFiles.mockResolvedValueOnce({
-      workspaceDir: "/tmp/agent-default/workspace",
-      canonicalPath: "/tmp/agent-default/workspace/MEMORY.md",
-      legacyPath: "/tmp/agent-default/workspace/memory.md",
-      canonicalExists: false,
-      legacyExists: true,
-      legacyBytes: 10,
-    });
 
     await noteMemorySearchHealth(cfg);
 
+    expect(noteWorkspaceMemoryHealth).toHaveBeenCalledWith(cfg);
     const workspaceNote = note.mock.calls.find(([, title]) => title === "Workspace memory");
     expect(workspaceNote).toBeUndefined();
   });
@@ -681,6 +806,7 @@ describe("memory recall doctor integration", () => {
 
     await maybeRepairMemoryRecallHealth({ cfg, prompter });
 
+    expect(maybeRepairWorkspaceMemoryHealth).toHaveBeenCalledWith({ cfg, prompter });
     expect(prompter.confirmRuntimeRepair).toHaveBeenCalled();
     expect(repairShortTermPromotionArtifacts).toHaveBeenCalledWith({
       workspaceDir: "/tmp/agent-default/workspace",
@@ -723,6 +849,7 @@ describe("memory recall doctor integration", () => {
 
     await maybeRepairMemoryRecallHealth({ cfg, prompter });
 
+    expect(maybeRepairWorkspaceMemoryHealth).toHaveBeenCalledWith({ cfg, prompter });
     expect(prompter.confirmRuntimeRepair).toHaveBeenCalled();
     expect(repairDreamingArtifacts).toHaveBeenCalledWith({
       workspaceDir: "/tmp/agent-default/workspace",
@@ -732,60 +859,6 @@ describe("memory recall doctor integration", () => {
     expect(message).toContain("archived session corpus");
     expect(message).toContain("archived session-ingestion state");
   });
-
-  it("does not migrate lowercase-only root memory during doctor --fix", async () => {
-    resolveAgentWorkspaceDir.mockReturnValue("/tmp/agent-default/workspace");
-    detectRootMemoryFiles.mockResolvedValueOnce({
-      workspaceDir: "/tmp/agent-default/workspace",
-      canonicalPath: "/tmp/agent-default/workspace/MEMORY.md",
-      legacyPath: "/tmp/agent-default/workspace/memory.md",
-      canonicalExists: false,
-      legacyExists: true,
-      legacyBytes: 24,
-    });
-    const prompter = createPrompter();
-
-    await maybeRepairMemoryRecallHealth({ cfg, prompter });
-
-    expect(migrateLegacyRootMemoryFile).not.toHaveBeenCalled();
-    expect(note).not.toHaveBeenCalled();
-  });
-
-  it("merges split-brain root memory during doctor --fix", async () => {
-    resolveAgentWorkspaceDir.mockReturnValue("/tmp/agent-default/workspace");
-    detectRootMemoryFiles.mockResolvedValueOnce({
-      workspaceDir: "/tmp/agent-default/workspace",
-      canonicalPath: "/tmp/agent-default/workspace/MEMORY.md",
-      legacyPath: "/tmp/agent-default/workspace/memory.md",
-      canonicalExists: true,
-      legacyExists: true,
-      canonicalBytes: 32,
-      legacyBytes: 24,
-    });
-    migrateLegacyRootMemoryFile.mockResolvedValueOnce({
-      changed: true,
-      canonicalPath: "/tmp/agent-default/workspace/MEMORY.md",
-      legacyPath: "/tmp/agent-default/workspace/memory.md",
-      removedLegacy: true,
-      mergedLegacy: true,
-      archivedLegacyPath:
-        "/tmp/agent-default/workspace/.openclaw-repair/root-memory/archive/memory.md",
-      copiedBytes: 24,
-    });
-    const prompter = createPrompter();
-
-    await maybeRepairMemoryRecallHealth({ cfg, prompter });
-
-    expect(prompter.confirmRuntimeRepair).toHaveBeenCalledWith({
-      message: "Merge legacy root memory.md into canonical MEMORY.md and remove the shadowed file?",
-      initialValue: true,
-    });
-    expect(migrateLegacyRootMemoryFile).toHaveBeenCalledWith("/tmp/agent-default/workspace");
-    const message = String(note.mock.calls[0]?.[0] ?? "");
-    expect(message).toContain("Workspace memory root merged:");
-    expect(message).toContain("backup:");
-    expect(message).toContain("merged legacy content from:");
-  });
 });
 
 describe("detectLegacyWorkspaceDirs", () => {
@@ -793,7 +866,7 @@ describe("detectLegacyWorkspaceDirs", () => {
     const workspaceDir = "/home/user/openclaw";
     const detection = detectLegacyWorkspaceDirs({ workspaceDir });
     expect(detection.activeWorkspace).toBe(path.resolve(workspaceDir));
-    expect(detection.legacyDirs).toEqual([]);
+    expect(detection.legacyDirs).toStrictEqual([]);
   });
 });
 

@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChannelPlugin } from "../channels/plugins/types.js";
+import { makeDirectPlugin } from "../test-utils/channel-plugin-test-fixtures.js";
 import { formatConfigChannelsStatusLines } from "./channels/status-config-format.js";
 
 const activeChannelPlugins = vi.hoisted(() => [] as ChannelPlugin[]);
+const listReadOnlyChannelPluginsForConfig = vi.hoisted(() => vi.fn(() => activeChannelPlugins));
 
 vi.mock("../channels/plugins/index.js", () => ({
   listChannelPlugins: () => activeChannelPlugins,
@@ -11,7 +13,7 @@ vi.mock("../channels/plugins/index.js", () => ({
 }));
 
 vi.mock("../channels/plugins/read-only.js", () => ({
-  listReadOnlyChannelPluginsForConfig: () => activeChannelPlugins,
+  listReadOnlyChannelPluginsForConfig,
 }));
 
 vi.mock("../channels/plugins/status.js", () => ({
@@ -45,29 +47,6 @@ vi.mock("../channels/plugins/status.js", () => ({
 
 function registerSingleTestPlugin(_pluginId: string, plugin: ChannelPlugin) {
   activeChannelPlugins.splice(0, activeChannelPlugins.length, plugin);
-}
-
-function makeTestPlugin(params: {
-  id: string;
-  label: string;
-  docsPath: string;
-  config: ChannelPlugin["config"];
-}): ChannelPlugin {
-  return {
-    id: params.id,
-    meta: {
-      id: params.id,
-      label: params.label,
-      selectionLabel: params.label,
-      docsPath: params.docsPath,
-      blurb: "test",
-    },
-    capabilities: { chatTypes: ["direct"] },
-    config: params.config,
-    actions: {
-      describeMessageTool: () => ({ actions: ["send"] }),
-    },
-  };
 }
 
 async function formatLocalStatusSummary(
@@ -105,7 +84,7 @@ function tokenOnlyPluginConfig() {
 }
 
 function makeUnavailableTokenPlugin(): ChannelPlugin {
-  return makeTestPlugin({
+  return makeDirectPlugin({
     id: "token-only",
     label: "TokenOnly",
     docsPath: "/channels/token-only",
@@ -117,7 +96,7 @@ function makeUnavailableTokenPlugin(): ChannelPlugin {
 }
 
 function makeResolvedTokenPlugin(): ChannelPlugin {
-  return makeTestPlugin({
+  return makeDirectPlugin({
     id: "token-only",
     label: "TokenOnly",
     docsPath: "/channels/token-only",
@@ -141,16 +120,10 @@ function makeResolvedTokenPlugin(): ChannelPlugin {
 }
 
 function makeResolvedTokenPluginWithoutInspectAccount(): ChannelPlugin {
-  return {
+  return makeDirectPlugin({
     id: "token-only",
-    meta: {
-      id: "token-only",
-      label: "TokenOnly",
-      selectionLabel: "TokenOnly",
-      docsPath: "/channels/token-only",
-      blurb: "test",
-    },
-    capabilities: { chatTypes: ["direct"] },
+    label: "TokenOnly",
+    docsPath: "/channels/token-only",
     config: {
       listAccountIds: () => ["primary"],
       defaultAccountId: () => "primary",
@@ -170,14 +143,11 @@ function makeResolvedTokenPluginWithoutInspectAccount(): ChannelPlugin {
       isConfigured: () => true,
       isEnabled: () => true,
     },
-    actions: {
-      describeMessageTool: () => ({ actions: ["send"] }),
-    },
-  };
+  });
 }
 
 function makeUnavailableHttpSlackPlugin(): ChannelPlugin {
-  return makeTestPlugin({
+  return makeDirectPlugin({
     id: "slack",
     label: "Slack",
     docsPath: "/channels/slack",
@@ -222,6 +192,20 @@ function expectResolvedTokenStatusSummary(
 }
 
 describe("config-only channels status output", () => {
+  it("uses setup fallback plugins so configured external channels can be shown", async () => {
+    registerSingleTestPlugin("token-only", makeUnavailableTokenPlugin());
+    listReadOnlyChannelPluginsForConfig.mockClear();
+    const cfg = { channels: { "token-only": { enabled: true } } };
+
+    await formatLocalStatusSummary(cfg);
+
+    expect(listReadOnlyChannelPluginsForConfig).toHaveBeenCalledOnce();
+    expect(listReadOnlyChannelPluginsForConfig.mock.calls[0]).toStrictEqual([
+      cfg,
+      { activationSourceConfig: cfg, includeSetupFallbackPlugins: true },
+    ]);
+  });
+
   it("shows configured-but-unavailable credentials distinctly from not configured", async () => {
     registerSingleTestPlugin("token-only", makeUnavailableTokenPlugin());
 

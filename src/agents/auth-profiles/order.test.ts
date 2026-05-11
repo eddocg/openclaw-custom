@@ -31,11 +31,11 @@ async function importAuthProfileModulesWithAliasRegistry() {
   vi.doMock("../../plugins/manifest-registry.js", () => ({
     loadPluginManifestRegistry,
   }));
-  const [{ resolveAuthProfileOrder }, { markAuthProfileGood }] = await Promise.all([
+  const [{ resolveAuthProfileOrder }, { markAuthProfileSuccess }] = await Promise.all([
     import("./order.js"),
     import("./profiles.js"),
   ]);
-  return { markAuthProfileGood, resolveAuthProfileOrder };
+  return { markAuthProfileSuccess, resolveAuthProfileOrder };
 }
 
 describe("resolveAuthProfileOrder", () => {
@@ -69,32 +69,205 @@ describe("resolveAuthProfileOrder", () => {
     expect(order).toEqual(["fixture-provider:default"]);
   });
 
-  it("marks aliased provider profiles good under the canonical auth provider", async () => {
-    const { markAuthProfileGood } = await importAuthProfileModulesWithAliasRegistry();
-    const agentDir = await mkdtemp(path.join(os.tmpdir(), "openclaw-auth-profile-alias-"));
+  it("uses canonical provider auth order for alias providers", async () => {
+    const { resolveAuthProfileOrder } = await importAuthProfileModulesWithAliasRegistry();
+    const store: AuthProfileStore = {
+      version: 1,
+      profiles: {
+        "fixture-provider:primary": {
+          type: "api_key",
+          provider: "fixture-provider",
+          key: "sk-primary",
+        },
+        "fixture-provider:secondary": {
+          type: "api_key",
+          provider: "fixture-provider",
+          key: "sk-secondary",
+        },
+      },
+      order: {
+        "fixture-provider": ["fixture-provider:secondary", "fixture-provider:primary"],
+      },
+    };
+
+    const order = resolveAuthProfileOrder({
+      store,
+      provider: "fixture-provider-plan",
+    });
+
+    expect(order).toEqual(["fixture-provider:secondary", "fixture-provider:primary"]);
+  });
+
+  it("falls back to legacy stored auth order when alias order is empty", async () => {
+    const { resolveAuthProfileOrder } = await importAuthProfileModulesWithAliasRegistry();
+    const store: AuthProfileStore = {
+      version: 1,
+      profiles: {
+        "fixture-provider:primary": {
+          type: "api_key",
+          provider: "fixture-provider",
+          key: "sk-primary",
+        },
+        "fixture-provider:secondary": {
+          type: "api_key",
+          provider: "fixture-provider",
+          key: "sk-secondary",
+        },
+      },
+      order: {
+        "fixture-provider-plan": [],
+        "fixture-provider": ["fixture-provider:secondary", "fixture-provider:primary"],
+      },
+    };
+
+    const order = resolveAuthProfileOrder({
+      store,
+      provider: "fixture-provider-plan",
+    });
+
+    expect(order).toEqual(["fixture-provider:secondary", "fixture-provider:primary"]);
+  });
+
+  it("falls back to legacy configured auth order when alias order is empty", async () => {
+    const { resolveAuthProfileOrder } = await importAuthProfileModulesWithAliasRegistry();
+    const store: AuthProfileStore = {
+      version: 1,
+      profiles: {
+        "fixture-provider:primary": {
+          type: "api_key",
+          provider: "fixture-provider",
+          key: "sk-primary",
+        },
+        "fixture-provider:secondary": {
+          type: "api_key",
+          provider: "fixture-provider",
+          key: "sk-secondary",
+        },
+      },
+    };
+
+    const order = resolveAuthProfileOrder({
+      cfg: {
+        auth: {
+          order: {
+            "fixture-provider-plan": [],
+            "fixture-provider": ["fixture-provider:secondary", "fixture-provider:primary"],
+          },
+        },
+      },
+      store,
+      provider: "fixture-provider-plan",
+    });
+
+    expect(order).toEqual(["fixture-provider:secondary", "fixture-provider:primary"]);
+  });
+
+  it("keeps explicit empty configured auth order as a provider disable", async () => {
+    const { resolveAuthProfileOrder } = await importAuthProfileModulesWithAliasRegistry();
+    const store: AuthProfileStore = {
+      version: 1,
+      profiles: {
+        "fixture-provider:primary": {
+          type: "api_key",
+          provider: "fixture-provider",
+          key: "sk-primary",
+        },
+      },
+    };
+
+    const order = resolveAuthProfileOrder({
+      cfg: {
+        auth: {
+          order: {
+            "fixture-provider": [],
+          },
+        },
+      },
+      store,
+      provider: "fixture-provider",
+    });
+
+    expect(order).toStrictEqual([]);
+  });
+
+  it("keeps explicit empty stored auth order as a provider disable", async () => {
+    const { resolveAuthProfileOrder } = await importAuthProfileModulesWithAliasRegistry();
+    const store: AuthProfileStore = {
+      version: 1,
+      profiles: {
+        "fixture-provider:primary": {
+          type: "api_key",
+          provider: "fixture-provider",
+          key: "sk-primary",
+        },
+      },
+      order: {
+        "fixture-provider": [],
+      },
+    };
+
+    const order = resolveAuthProfileOrder({
+      cfg: {
+        auth: {
+          order: {
+            "fixture-provider": ["fixture-provider:primary"],
+          },
+        },
+      },
+      store,
+      provider: "fixture-provider",
+    });
+
+    expect(order).toStrictEqual([]);
+  });
+
+  it("marks profile success with one canonical last-good and usage update", async () => {
+    const { markAuthProfileSuccess } = await importAuthProfileModulesWithAliasRegistry();
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "openclaw-auth-profile-success-"));
     try {
       const store: AuthProfileStore = {
         version: 1,
         profiles: {
           "fixture-provider:default": {
-            type: "api_key",
+            type: "oauth",
             provider: "fixture-provider",
-            key: "sk-test",
+            access: "token",
+            refresh: "refresh",
+            expires: Date.now() + 60_000,
+          },
+        },
+        usageStats: {
+          "fixture-provider:default": {
+            errorCount: 3,
+            cooldownUntil: Date.now() + 60_000,
+            cooldownReason: "rate_limit",
           },
         },
       };
       saveAuthProfileStore(store, agentDir);
 
-      await markAuthProfileGood({
+      const beforeSuccess = Date.now();
+      await markAuthProfileSuccess({
         store,
         provider: "fixture-provider-plan",
         profileId: "fixture-provider:default",
         agentDir,
       });
+      const afterSuccess = Date.now();
 
       expect(store.lastGood).toEqual({
         "fixture-provider": "fixture-provider:default",
       });
+      expect(store.usageStats?.["fixture-provider:default"]).toMatchObject({
+        errorCount: 0,
+        cooldownUntil: undefined,
+        cooldownReason: undefined,
+      });
+      const lastUsed = store.usageStats?.["fixture-provider:default"]?.lastUsed;
+      expect(typeof lastUsed).toBe("number");
+      expect(Number.isFinite(lastUsed)).toBe(true);
+      expect(lastUsed).toBeGreaterThanOrEqual(beforeSuccess);
+      expect(lastUsed).toBeLessThanOrEqual(afterSuccess);
     } finally {
       await rm(agentDir, { force: true, recursive: true });
     }

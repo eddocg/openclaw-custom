@@ -14,8 +14,8 @@ import {
 import { formatCliCommand } from "../cli/command-format.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { formatErrorMessage } from "../infra/errors.js";
-import { DEFAULT_LOCAL_MODEL } from "../memory-host-sdk/engine-embeddings.js";
 import { checkQmdBinaryAvailability } from "../memory-host-sdk/engine-qmd.js";
+import { DEFAULT_LOCAL_MODEL } from "../memory-host-sdk/host/embedding-defaults.js";
 import { hasConfiguredMemorySecretInput } from "../memory-host-sdk/secret.js";
 import {
   auditDreamingArtifacts,
@@ -34,11 +34,7 @@ import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { note } from "../terminal/note.js";
 import { resolveUserPath } from "../utils.js";
 import type { DoctorPrompter } from "./doctor-prompter.js";
-import {
-  detectRootMemoryFiles,
-  formatRootMemoryFilesWarning,
-  migrateLegacyRootMemoryFile,
-} from "./doctor-workspace.js";
+import { maybeRepairWorkspaceMemoryHealth, noteWorkspaceMemoryHealth } from "./doctor-workspace.js";
 import { isRecord } from "./doctor/shared/legacy-config-record-shared.js";
 
 type RuntimeMemoryAuditContext = {
@@ -130,6 +126,10 @@ function resolveSuggestedRemoteMemoryProvider(): string | undefined {
   return listAutoSelectMemoryEmbeddingProviderDoctorMetadata().find(
     (provider) => provider.transport === "remote",
   )?.providerId;
+}
+
+function isKeyOptionalMemoryProvider(providerId: string): boolean {
+  return providerId === "local" || providerId === "ollama" || providerId === "lmstudio";
 }
 
 async function resolveRuntimeMemoryAuditContext(
@@ -229,35 +229,7 @@ export async function maybeRepairMemoryRecallHealth(params: {
   cfg: OpenClawConfig;
   prompter: DoctorPrompter;
 }): Promise<void> {
-  try {
-    const agentId = resolveDefaultAgentId(params.cfg);
-    const configuredWorkspaceDir = resolveAgentWorkspaceDir(params.cfg, agentId);
-    const rootMemoryFiles = await detectRootMemoryFiles(configuredWorkspaceDir);
-    if (rootMemoryFiles.canonicalExists && rootMemoryFiles.legacyExists) {
-      const approvedLegacyMigration = await params.prompter.confirmRuntimeRepair({
-        message:
-          "Merge legacy root memory.md into canonical MEMORY.md and remove the shadowed file?",
-        initialValue: true,
-      });
-      if (approvedLegacyMigration) {
-        const migration = await migrateLegacyRootMemoryFile(configuredWorkspaceDir);
-        if (migration.changed) {
-          const lines = [
-            "Workspace memory root merged:",
-            `- canonical: ${migration.canonicalPath}`,
-            migration.archivedLegacyPath ? `- backup: ${migration.archivedLegacyPath}` : null,
-            migration.mergedLegacy ? `- merged legacy content from: ${migration.legacyPath}` : null,
-            migration.removedLegacy
-              ? `- removed legacy file: ${migration.legacyPath}`
-              : `- legacy file still present: ${migration.legacyPath}`,
-          ].filter(Boolean);
-          note(lines.join("\n"), "Doctor changes");
-        }
-      }
-    }
-  } catch (err) {
-    note(`Workspace memory repair could not be completed: ${formatErrorMessage(err)}`, "Doctor");
-  }
+  await maybeRepairWorkspaceMemoryHealth(params);
 
   try {
     const context = await resolveRuntimeMemoryAuditContext(params.cfg);
@@ -344,16 +316,14 @@ export async function noteMemorySearchHealth(
       checked: boolean;
       ready: boolean;
       error?: string;
+      skipped?: boolean;
     };
   },
 ): Promise<void> {
+  await noteWorkspaceMemoryHealth(cfg);
+
   const agentId = resolveDefaultAgentId(cfg);
   const agentDir = resolveAgentDir(cfg, agentId);
-  const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
-  const rootMemoryWarning = formatRootMemoryFilesWarning(await detectRootMemoryFiles(workspaceDir));
-  if (rootMemoryWarning) {
-    note(rootMemoryWarning, "Workspace memory");
-  }
   const resolved = resolveMemorySearchConfig(cfg, agentId);
   const hasRemoteApiKey = hasConfiguredMemorySecretInput(resolved?.remote?.apiKey);
 
@@ -366,6 +336,9 @@ export async function noteMemorySearchHealth(
   // separate embedding provider is needed. Skip the provider check entirely.
   const backendConfig = resolveActiveMemoryBackendConfig({ cfg, agentId });
   if (!backendConfig) {
+    if (opts?.gatewayMemoryProbe?.checked && opts.gatewayMemoryProbe.ready) {
+      return;
+    }
     note("No active memory plugin is registered for the current config.", "Memory search");
     return;
   }
@@ -437,16 +410,26 @@ export async function noteMemorySearchHealth(
       );
       return;
     }
-    if (resolved.provider === "lmstudio") {
+    if (isKeyOptionalMemoryProvider(resolved.provider)) {
       if (opts?.gatewayMemoryProbe?.checked && opts.gatewayMemoryProbe.ready) {
+        return;
+      }
+      // When the probe was intentionally skipped (skipped: true / checked: false
+      // due to probe:false path), we have no embedding status information — do
+      // not warn. A skipped probe means the user ran `openclaw doctor` without
+      // --deep; it does not mean embeddings are unavailable.
+      // NOTE: a transport timeout also sets checked: false, but skipped stays
+      // false/absent — a timeout is a real diagnostic signal and should fall
+      // through to the warning below.
+      if (opts?.gatewayMemoryProbe?.skipped) {
         return;
       }
       const gatewayProbeWarning = buildGatewayProbeWarning(opts?.gatewayMemoryProbe);
       note(
         [
           gatewayProbeWarning
-            ? 'Memory search provider "lmstudio" is configured, but the gateway reports embeddings are not ready.'
-            : 'Memory search provider "lmstudio" is configured, but the gateway could not confirm embeddings are ready.',
+            ? `Memory search provider "${resolved.provider}" is configured, but the gateway reports embeddings are not ready.`
+            : `Memory search provider "${resolved.provider}" is configured, but the gateway could not confirm embeddings are ready.`,
           gatewayProbeWarning,
           `Verify: ${formatCliCommand("openclaw memory status --deep")}`,
         ]
@@ -610,6 +593,7 @@ function buildGatewayProbeWarning(
         checked: boolean;
         ready: boolean;
         error?: string;
+        skipped?: boolean;
       }
     | undefined,
 ): string | null {

@@ -1,15 +1,17 @@
 import type { Message, UserFromGetMe } from "@grammyjs/types";
+import { parseExecApprovalCommandText } from "openclaw/plugin-sdk/approval-reply-runtime";
 import {
   listChatCommands,
   maybeResolveTextAlias,
   normalizeCommandBody,
-} from "openclaw/plugin-sdk/command-auth";
-import { parseExecApprovalCommandText } from "openclaw/plugin-sdk/infra-runtime";
-import { isAbortRequestText } from "openclaw/plugin-sdk/reply-runtime";
-import { isBtwRequestText } from "openclaw/plugin-sdk/reply-runtime";
+} from "openclaw/plugin-sdk/command-auth-native";
+import {
+  isAbortRequestText,
+  isBtwRequestText,
+} from "openclaw/plugin-sdk/command-primitives-runtime";
 import { resolveTelegramForumThreadId } from "./bot/helpers.js";
 
-export type TelegramSequentialKeyContext = {
+type TelegramSequentialKeyContext = {
   chat?: { id?: number };
   me?: UserFromGetMe;
   message?: Message;
@@ -94,7 +96,8 @@ export function getTelegramSequentialKey(ctx: TelegramSequentialKeyContext): str
   }
   const isGroup = msg?.chat?.type === "group" || msg?.chat?.type === "supergroup";
   const messageThreadId = msg?.message_thread_id;
-  const isForum = msg?.chat?.is_forum;
+  const isForum =
+    msg?.chat?.is_forum ?? (msg?.chat?.type === "supergroup" && msg?.is_topic_message === true);
   const threadId = isGroup
     ? resolveTelegramForumThreadId({ isForum, messageThreadId })
     : messageThreadId;
