@@ -4,6 +4,7 @@ import type { ReplyOperation } from "../../../auto-reply/reply/reply-run-registr
 import type { ReasoningLevel, ThinkLevel, VerboseLevel } from "../../../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import type { PromptImageOrderEntry } from "../../../media/prompt-image-order.js";
+import type { MemoryCandidateQueueAdapter } from "../../../memory/memory-candidate-queue-adapter.js";
 import type { MemoryContextInjector } from "../../../memory/memory-context-injection.js";
 import type { MemoryIngestAdapter } from "../../../memory/memory-ingest-adapter.js";
 import type { CommandQueueEnqueueFn } from "../../../process/command-queue.types.js";
@@ -162,4 +163,13 @@ export type RunEmbeddedPiAgentParams = {
    * `OPENCLAW_MEMORY_ENABLED` is true. Tests inject a fake.
    */
   memoryIngester?: MemoryIngestAdapter;
+  /**
+   * Optional channel-agnostic candidate queue adapter. Parallel to the
+   * semantic ingest adapter above, this seam reacts only to the explicit
+   * `queue memory:` trigger and forwards each candidate to the
+   * `openclaw-memory-core` candidate queue CLI. Defaults to a fail-open
+   * adapter gated by `OPENCLAW_MEMORY_CANDIDATE_QUEUE_ENABLED`. Tests inject
+   * a fake.
+   */
+  memoryCandidateQueue?: MemoryCandidateQueueAdapter;
 };

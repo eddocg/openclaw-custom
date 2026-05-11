@@ -747,6 +747,26 @@ export class AcpSessionManager {
             `[memory-ingest] seam=acp-manager ingest-result status=${memoryIngestResult.status} reason=${memoryIngestResult.reason ?? "none"}`,
           );
         }
+        // Best-effort candidate-queue enqueue. Parallel to the semantic
+        // ingest call above; reacts only to the explicit `queue memory:`
+        // trigger and fails open. Never blocks the turn beyond the
+        // adapter's grace window.
+        if (memoryIngestDebug) {
+          acpMemoryIngestLog.info("[memory-candidate-queue] seam=acp-manager enqueue-start");
+        }
+        const memoryCandidateQueueResult = await this.deps.memoryCandidateQueue.enqueue(
+          input.text,
+          {
+            source: "acp",
+            sessionKey,
+            requestId: input.requestId,
+          },
+        );
+        if (memoryIngestDebug) {
+          acpMemoryIngestLog.info(
+            `[memory-candidate-queue] seam=acp-manager enqueue-result status=${memoryCandidateQueueResult.status} reason=${memoryCandidateQueueResult.reason ?? "none"}`,
+          );
+        }
         // Apply the shared memory-context envelope to the runtime-bound text.
         // The background task summary above keeps using raw `input.text` so
         // operator-visible task titles do not leak retrieved memory blocks.
