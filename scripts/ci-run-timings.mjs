@@ -18,7 +18,12 @@ function formatSeconds(value) {
   return value === null ? "" : `${value}s`;
 }
 
-export function summarizeRunTimings(run, limit = 15) {
+function parseRunList(raw) {
+  const parsed = JSON.parse(raw);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function collectRunTimingContext(run) {
   const created = parseTime(run.createdAt);
   const updated = parseTime(run.updatedAt);
   const jobs = (run.jobs ?? [])
@@ -31,9 +36,17 @@ export function summarizeRunTimings(run, limit = 15) {
         durationSeconds: secondsBetween(started, completed),
         name: job.name,
         queueSeconds: secondsBetween(created, started),
+        started,
+        completed,
         status: job.status,
       };
     });
+
+  return { created, jobs, updated };
+}
+
+export function summarizeRunTimings(run, limit = 15) {
+  const { created, jobs, updated } = collectRunTimingContext(run);
   const byDuration = [...jobs]
     .filter((job) => job.durationSeconds !== null)
     .toSorted((left, right) => right.durationSeconds - left.durationSeconds)
@@ -56,6 +69,17 @@ export function summarizeRunTimings(run, limit = 15) {
   };
 }
 
+export function selectLatestMainPushCiRun(runs, headSha = null) {
+  const pushRuns = runs.filter((run) => run.event === "push");
+  if (headSha) {
+    const matchingRun = pushRuns.find((run) => run.headSha === headSha);
+    if (matchingRun) {
+      return matchingRun;
+    }
+  }
+  return pushRuns[0] ?? null;
+}
+
 function getLatestCiRunId() {
   const raw = execFileSync(
     "gh",
@@ -68,6 +92,40 @@ function getLatestCiRunId() {
     throw new Error("No CI runs found on main");
   }
   return String(runId);
+}
+
+function getRemoteMainSha() {
+  const raw = execFileSync("git", ["ls-remote", "origin", "main"], { encoding: "utf8" }).trim();
+  const [sha] = raw.split(/\s+/u);
+  if (!sha) {
+    throw new Error("Could not resolve origin/main");
+  }
+  return sha;
+}
+
+function getLatestMainPushCiRunId() {
+  const headSha = getRemoteMainSha();
+  const raw = execFileSync(
+    "gh",
+    [
+      "run",
+      "list",
+      "--branch",
+      "main",
+      "--workflow",
+      "CI",
+      "--limit",
+      "20",
+      "--json",
+      "databaseId,headSha,event,status,conclusion",
+    ],
+    { encoding: "utf8" },
+  );
+  const run = selectLatestMainPushCiRun(parseRunList(raw), headSha);
+  if (!run?.databaseId) {
+    throw new Error(`No push CI run found for origin/main ${headSha.slice(0, 10)}`);
+  }
+  return String(run.databaseId);
 }
 
 function listRecentSuccessfulCiRuns(limit) {
@@ -105,30 +163,14 @@ function loadRun(runId) {
 }
 
 function summarizeJobs(run) {
-  const created = parseTime(run.createdAt);
-  const updated = parseTime(run.updatedAt);
-  const jobs = (run.jobs ?? [])
-    .filter((job) => !job.name?.startsWith("matrix."))
-    .map((job) => {
-      const started = parseTime(job.startedAt);
-      const completed = parseTime(job.completedAt);
-      return {
-        conclusion: job.conclusion ?? "",
-        durationSeconds: secondsBetween(started, completed),
-        name: job.name,
-        queueSeconds: secondsBetween(created, started),
-        started,
-        completed,
-        status: job.status,
-      };
-    })
-    .filter((job) => job.started !== null && job.completed !== null);
+  const { created, jobs, updated } = collectRunTimingContext(run);
+  const completedJobs = jobs.filter((job) => job.started !== null && job.completed !== null);
   const successfulDurations = jobs
     .filter((job) => job.status === "completed" && job.conclusion === "success")
     .map((job) => job.durationSeconds)
     .filter((duration) => duration !== null);
-  const firstStart = Math.min(...jobs.map((job) => job.started));
-  const lastComplete = Math.max(...jobs.map((job) => job.completed));
+  const firstStart = Math.min(...completedJobs.map((job) => job.started));
+  const lastComplete = Math.max(...completedJobs.map((job) => job.completed));
 
   return {
     avgDurationSeconds:
@@ -169,11 +211,15 @@ function printSection(title, jobs, metric) {
   }
 }
 
-async function main() {
-  const args = process.argv.slice(2);
+export function parseRunTimingArgs(args) {
   const recentIndex = args.indexOf("--recent");
   const limitIndex = args.indexOf("--limit");
   const ignoredArgIndexes = new Set();
+  for (const [index, arg] of args.entries()) {
+    if (arg === "--" || arg === "--latest-main") {
+      ignoredArgIndexes.add(index);
+    }
+  }
   if (limitIndex !== -1) {
     ignoredArgIndexes.add(limitIndex);
     ignoredArgIndexes.add(limitIndex + 1);
@@ -184,8 +230,21 @@ async function main() {
   }
   const limit =
     limitIndex === -1 ? 15 : Math.max(1, Number.parseInt(args[limitIndex + 1] ?? "", 10) || 15);
-  if (recentIndex !== -1) {
-    const recentLimit = Math.max(1, Number.parseInt(args[recentIndex + 1] ?? "", 10) || 10);
+  const recentLimit =
+    recentIndex === -1 ? null : Math.max(1, Number.parseInt(args[recentIndex + 1] ?? "", 10) || 10);
+  return {
+    explicitRunId: args.find((_arg, index) => !ignoredArgIndexes.has(index)),
+    limit,
+    recentLimit,
+    useLatestMain: args.includes("--latest-main"),
+  };
+}
+
+async function main() {
+  const { explicitRunId, limit, recentLimit, useLatestMain } = parseRunTimingArgs(
+    process.argv.slice(2),
+  );
+  if (recentLimit !== null) {
     for (const run of listRecentSuccessfulCiRuns(recentLimit)) {
       const summary = summarizeJobs(loadRun(run.databaseId));
       console.log(
@@ -205,7 +264,7 @@ async function main() {
     }
     return;
   }
-  const runId = args.find((_arg, index) => !ignoredArgIndexes.has(index)) ?? getLatestCiRunId();
+  const runId = explicitRunId ?? (useLatestMain ? getLatestMainPushCiRunId() : getLatestCiRunId());
   const summary = summarizeRunTimings(loadRun(runId), limit);
 
   console.log(

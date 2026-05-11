@@ -3,10 +3,8 @@ summary: "Retry policy for outbound provider calls"
 read_when:
   - Updating provider retry behavior or defaults
   - Debugging provider send errors or rate limits
-title: "Retry Policy"
+title: "Retry policy"
 ---
-
-# Retry policy
 
 ## Goals
 
@@ -39,7 +37,9 @@ title: "Retry Policy"
 
 ### Discord
 
-- Retries only on rate-limit errors (HTTP 429).
+- Retries on rate-limit errors (HTTP 429), request timeouts, HTTP 5xx responses,
+  and transient transport failures such as DNS lookup failures, connection
+  resets, socket closes, and fetch failures.
 - Uses Discord `retry_after` when available, otherwise exponential backoff.
 
 ### Telegram
@@ -79,3 +79,8 @@ Set retry policy per provider in `~/.openclaw/openclaw.json`:
 
 - Retries apply per request (message send, media upload, reaction, poll, sticker).
 - Composite flows do not retry completed steps.
+
+## Related
+
+- [Model failover](/concepts/model-failover)
+- [Command queue](/concepts/queue)

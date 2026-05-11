@@ -1,9 +1,9 @@
 import { resolveAgentModelPrimaryValue } from "openclaw/plugin-sdk/provider-onboard";
-import { describe, expect, it } from "vitest";
 import {
   expectProviderOnboardMergedLegacyConfig,
   expectProviderOnboardPreservesPrimary,
-} from "../../test/helpers/plugins/provider-onboard.js";
+} from "openclaw/plugin-sdk/provider-test-contracts";
+import { describe, expect, it } from "vitest";
 import { applyMinimaxApiConfig, applyMinimaxApiProviderConfig } from "./onboard.js";
 
 describe("minimax onboard", () => {
@@ -19,6 +19,21 @@ describe("minimax onboard", () => {
   it("keeps reasoning enabled for MiniMax-M2.7", () => {
     const cfg = applyMinimaxApiConfig({}, "MiniMax-M2.7");
     expect(cfg.models?.providers?.minimax?.models[0]?.reasoning).toBe(true);
+  });
+
+  it("keeps MiniMax chat models text-only so image tools use MiniMax-VL-01", () => {
+    const cfg = applyMinimaxApiConfig({}, "MiniMax-M2.7-highspeed");
+    expect(cfg.models?.providers?.minimax?.models).toEqual([
+      {
+        id: "MiniMax-M2.7-highspeed",
+        name: "MiniMax M2.7 Highspeed",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0.6, output: 2.4, cacheRead: 0.06, cacheWrite: 0.375 },
+        contextWindow: 204800,
+        maxTokens: 131072,
+      },
+    ]);
   });
 
   it("preserves existing model params when adding alias", () => {
@@ -78,8 +93,8 @@ describe("minimax onboard", () => {
         },
       },
     });
-    expect(cfg.models?.providers?.anthropic).toBeDefined();
-    expect(cfg.models?.providers?.minimax).toBeDefined();
+    expect(cfg.models?.providers).toHaveProperty("anthropic");
+    expect(cfg.models?.providers).toHaveProperty("minimax");
   });
 
   it("preserves existing models mode", () => {

@@ -6,8 +6,6 @@ read_when:
 title: "Amazon Bedrock Mantle"
 ---
 
-# Amazon Bedrock Mantle
-
 OpenClaw includes a bundled **Amazon Bedrock Mantle** provider that connects to
 the Mantle OpenAI-compatible endpoint. Mantle hosts open-source and
 third-party models (GPT-OSS, Qwen, Kimi, GLM, and similar) through a standard
@@ -92,6 +90,13 @@ region's `/v1/models` endpoint.
 | Discovery cache   | Results cached for 1 hour |
 | IAM token refresh | Hourly                    |
 
+To keep the Mantle plugin enabled but suppress automatic discovery and IAM
+bearer-token generation, disable the plugin-owned discovery toggle:
+
+```bash
+openclaw config set plugins.entries.amazon-bedrock-mantle.config.discovery.enabled false
+```
+
 <Note>
 The bearer token is the same `AWS_BEARER_TOKEN_BEDROCK` used by the standard [Amazon Bedrock](/providers/bedrock) provider.
 </Note>
@@ -132,7 +137,7 @@ If you prefer explicit config instead of auto-discovery:
 }
 ```
 
-## Advanced notes
+## Advanced configuration
 
 <AccordionGroup>
   <Accordion title="Reasoning support">

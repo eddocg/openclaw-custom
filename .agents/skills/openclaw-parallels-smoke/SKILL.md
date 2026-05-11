@@ -1,6 +1,6 @@
 ---
 name: openclaw-parallels-smoke
-description: End-to-end Parallels smoke, upgrade, and rerun workflow for OpenClaw across macOS, Windows, and Linux guests. Use when Codex needs to run, rerun, debug, or interpret VM-based install, onboarding, gateway smoke tests, latest-release-to-main upgrade checks, fresh snapshot retests, or optional Discord roundtrip verification under Parallels.
+description: Run, rerun, debug, or interpret OpenClaw Parallels install, onboarding, gateway smoke, and upgrade checks.
 ---
 
 # OpenClaw Parallels Smoke
@@ -14,7 +14,7 @@ Use this skill for Parallels guest workflows and smoke interpretation. Do not lo
 - Stable `2026.3.12` pre-upgrade diagnostics may require a plain `gateway status --deep` fallback.
 - Treat `precheck=latest-ref-fail` on that stable pre-upgrade lane as baseline, not automatically a regression.
 - Pass `--json` for machine-readable summaries.
-- Per-phase logs land under `/tmp/openclaw-parallels-*`.
+- Per-phase logs land under `.artifacts/parallels/openclaw-parallels-*` by default. Override with `OPENCLAW_PARALLELS_ARTIFACT_ROOT` when a run needs another artifact volume.
 - Do not run local and gateway agent turns in parallel on the same fresh workspace or session.
 - Hard-cap every top-level Parallels lane with host `timeout --foreground` (or `gtimeout --foreground` if that is the available binary) so a stalled install, snapshot switch, or `prlctl exec` transport cannot consume the rest of the testing window. Defaults:
   - macOS: `75m`
@@ -45,6 +45,9 @@ Use this skill for Parallels guest workflows and smoke interpretation. Do not lo
 ## npm install then update
 
 - Preferred entrypoint: `pnpm test:parallels:npm-update`
+- For a macOS-only published release update check, use:
+  - `timeout --foreground 75m pnpm test:parallels:npm-update -- --platform macos --package-spec openclaw@<old-version> --update-target <target-version-or-tag> --json`
+    This keeps the same-guest `openclaw update --tag ...` coverage and uses the shared macOS current-user/sudo fallback without starting Windows/Linux lanes.
 - Required coverage: every release/update regression run must include both lanes:
   - fresh snapshot -> install requested package/baseline -> smoke
   - same guest baseline -> run the guest's installed `openclaw update ...` command -> smoke again
@@ -65,8 +68,16 @@ Use this skill for Parallels guest workflows and smoke interpretation. Do not lo
 - The Windows same-guest update helper should write stage markers to its log before long steps like tgz download and `npm install -g` so the outer progress monitor does not sit on `waiting for first log line` during healthy but quiet installs.
 - Linux same-guest update verification should also export `HOME=/root`, pass `OPENAI_API_KEY` via `prlctl exec ... /usr/bin/env`, and use `openclaw agent --local`; the fresh Linux baseline does not rely on persisted gateway credentials.
 - The npm-update wrapper now prints per-lane progress from the nested log files. If a lane still looks stuck, inspect the nested logs in `runDir` first (`macos-fresh.log`, `windows-fresh.log`, `linux-fresh.log`, `macos-update.log`, `windows-update.log`, `linux-update.log`) instead of assuming the outer wrapper hung.
-- If the wrapper fails a lane, read the auto-dumped tail first, then the full nested lane log under `/tmp/openclaw-parallels-npm-update.*`.
+- Each run writes both `summary.json` and `summary.md`; read the markdown first for quick human triage, then the JSON/timings for automation.
+- For full beta validation after a tag is published, prefer one command:
+  - `timeout --foreground 150m pnpm test:parallels:npm-update -- --beta-validation beta3 --json`
+    This resolves `beta3` to the latest `*-beta.3` version, runs latest->that-version same-guest update coverage, and then runs fresh install smoke for that exact published target on the same selected OS matrix. Use `--platform macos|windows|linux` to narrow reruns.
+- For beta 4 npm validation with agent turns, the known-good shape is:
+  - `gtimeout --foreground 150m pnpm test:parallels:npm-update -- --beta-validation beta4 --model openai/gpt-5.4 --json`
+    Prefer the explicit `beta4` alias over `openclaw@beta` when validating a specific prerelease number; npm tags can move.
+- If the wrapper fails a lane, read the auto-dumped tail first, then the full nested lane log under `.artifacts/parallels/openclaw-parallels-npm-update.*`.
 - Current known macOS update-lane transport signature when the fallback is missing or bypassed: `Unable to authenticate the user. Make sure that the specified credentials are correct and try again.` Treat that as Parallels current-user authentication before blaming npm or OpenClaw.
+- A macOS packaged fresh install with global package directories or bundled files mode `0777` usually means the harness used the root `prlctl exec` fallback under a permissive umask. The POSIX guest transports should prepend `umask 022`; verify the phase preflight line before blaming npm.
 
 ## CLI invocation footgun
 
@@ -75,6 +86,7 @@ Use this skill for Parallels guest workflows and smoke interpretation. Do not lo
 ## macOS flow
 
 - Preferred entrypoint: `pnpm test:parallels:macos`
+- `parallels-macos-smoke.sh --mode fresh --target-package-spec openclaw@<version>` is an install smoke only. For published old-version -> new-version update coverage on macOS, prefer the npm-update wrapper with `--platform macos`; `parallels-macos-smoke.sh --mode upgrade --target-package-spec ...` installs the target package and does not exercise the baseline CLI's updater.
 - Default upgrade coverage on macOS should now include: fresh snapshot -> site installer pinned to the latest stable tag -> `openclaw update --channel dev` on the guest. Treat this as part of the default Tahoe regression plan, not an optional side quest.
 - `parallels-macos-smoke.sh --mode upgrade` should run that release-to-dev lane by default. Keep the older host-tgz upgrade path only when the caller explicitly passes `--target-package-spec`.
 - Because the default upgrade lane no longer needs a host tgz, skip `npm pack` + host HTTP server startup for `--mode upgrade` unless `--target-package-spec` is set. Keep the pack/server path for `fresh` and `both`.

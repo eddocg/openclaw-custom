@@ -1,6 +1,9 @@
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { collectDoctorPreviewWarnings } from "./preview-warnings.js";
+import {
+  collectDoctorPreviewWarnings,
+  collectVisibleReplyToolPolicyWarnings,
+} from "./preview-warnings.js";
 
 type TestManifestRecord = {
   id: string;
@@ -99,10 +102,18 @@ vi.mock("./channel-plugin-blockers.js", () => ({
 vi.mock("./stale-plugin-config.js", () => ({
   scanStalePluginConfig: (cfg: {
     plugins?: { allow?: string[]; entries?: Record<string, unknown> };
+    channels?: Record<string, unknown>;
   }) => {
     const knownIds = new Set(manifestState.plugins.map((plugin) => plugin.id));
-    const ids = [...(cfg.plugins?.allow ?? []), ...Object.keys(cfg.plugins?.entries ?? {})];
-    return [...new Set(ids)].filter((id) => !knownIds.has(id)).map((id) => ({ id }));
+    const hits = [...(cfg.plugins?.allow ?? []), ...Object.keys(cfg.plugins?.entries ?? {})]
+      .filter((id) => !knownIds.has(id))
+      .map((id) => ({ id, surface: "plugin" }));
+    if (cfg.channels?.["openclaw-weixin"]) {
+      hits.push({ id: "openclaw-weixin", surface: "channel" });
+    }
+    return hits.filter(
+      (hit, index) => hits.findIndex((candidate) => candidate.id === hit.id) === index,
+    );
   },
   isStalePluginAutoRepairBlocked: () =>
     manifestState.diagnostics.some((diagnostic) => diagnostic.level === "error"),
@@ -113,16 +124,19 @@ vi.mock("./stale-plugin-config.js", () => ({
   }: {
     autoRepairBlocked: boolean;
     doctorFixCommand: string;
-    hits: Array<{ id: string }>;
+    hits: Array<{ id: string; surface: string }>;
   }) =>
-    hits.map(
-      (hit) =>
-        `plugins.allow: stale plugin reference "${hit.id}". plugins.entries.${hit.id} is unused. ${
-          autoRepairBlocked
-            ? `Auto-removal is paused; rerun "${doctorFixCommand}".`
-            : `Run "${doctorFixCommand}".`
-        }`,
-    ),
+    hits.map((hit) => {
+      const prefix =
+        hit.surface === "channel"
+          ? `channels.${hit.id}: dangling channel config.`
+          : `plugins.allow: stale plugin reference "${hit.id}". plugins.entries.${hit.id} is unused.`;
+      return `${prefix} ${
+        autoRepairBlocked
+          ? `Auto-removal is paused; rerun "${doctorFixCommand}".`
+          : `Run "${doctorFixCommand}".`
+      }`;
+    }),
 }));
 
 vi.mock("./bundled-plugin-load-paths.js", () => ({
@@ -166,6 +180,20 @@ function stalePluginConfig(id = "acpx") {
   };
 }
 
+function expectSingleWarningContaining(warnings: string[], text: string): string {
+  expect(warnings).toHaveLength(1);
+  const warning = warnings[0];
+  expect(warning).toContain(text);
+  return warning;
+}
+
+function expectWarningsContaining(warnings: string[], texts: string[]): void {
+  expect(warnings).toHaveLength(texts.length);
+  texts.forEach((text, index) => {
+    expect(warnings[index]).toContain(text);
+  });
+}
+
 describe("doctor preview warnings", () => {
   beforeEach(() => {
     manifestState.plugins = [manifest("discord")];
@@ -197,9 +225,9 @@ describe("doctor preview warnings", () => {
           warning.includes("Telegram allowFrom contains 1") && warning.includes("(e.g. @alice)"),
       ),
     ).toBe(true);
-    expect(warnings).toEqual(
-      expect.arrayContaining([expect.stringContaining('channels.signal.allowFrom: set to ["*"]')]),
-    );
+    expect(
+      warnings.some((warning) => warning.includes('channels.signal.allowFrom: set to ["*"]')),
+    ).toBe(true);
   });
 
   it("sanitizes empty-allowlist warning paths before returning preview output", async () => {
@@ -218,11 +246,12 @@ describe("doctor preview warnings", () => {
       doctorFixCommand: "openclaw doctor --fix",
     });
 
-    expect(warnings).toEqual([
-      expect.stringContaining("channels.signal.accounts.ops-teamnext.dmPolicy"),
-    ]);
-    expect(warnings[0]).not.toContain("\u001B");
-    expect(warnings[0]).not.toContain("\r");
+    const warning = expectSingleWarningContaining(
+      warnings,
+      "channels.signal.accounts.ops-teamnext.dmPolicy",
+    );
+    expect(warning).not.toContain("\u001B");
+    expect(warning).not.toContain("\r");
   });
 
   it("includes stale plugin config warnings", async () => {
@@ -231,12 +260,28 @@ describe("doctor preview warnings", () => {
       doctorFixCommand: "openclaw doctor --fix",
     });
 
-    expect(warnings).toEqual([
-      expect.stringContaining('plugins.allow: stale plugin reference "acpx"'),
-    ]);
-    expect(warnings[0]).toContain("plugins.entries.acpx");
-    expect(warnings[0]).toContain('Run "openclaw doctor --fix"');
-    expect(warnings[0]).not.toContain("Auto-removal is paused");
+    const warning = expectSingleWarningContaining(
+      warnings,
+      'plugins.allow: stale plugin reference "acpx"',
+    );
+    expect(warning).toContain("plugins.entries.acpx");
+    expect(warning).toContain('Run "openclaw doctor --fix"');
+    expect(warning).not.toContain("Auto-removal is paused");
+  });
+
+  it("includes stale channel config warnings without plugin config", async () => {
+    const warnings = await collectDoctorPreviewWarnings({
+      cfg: {
+        channels: {
+          "openclaw-weixin": {
+            enabled: true,
+          },
+        },
+      },
+      doctorFixCommand: "openclaw doctor --fix",
+    });
+
+    expectSingleWarningContaining(warnings, "channels.openclaw-weixin: dangling channel config");
   });
 
   it("includes bundled plugin load path migration warnings", async () => {
@@ -255,10 +300,11 @@ describe("doctor preview warnings", () => {
       doctorFixCommand: "openclaw doctor --fix",
     });
 
-    expect(warnings).toEqual([
-      expect.stringContaining(`plugins.load.paths: legacy bundled plugin path "${legacyPath}"`),
-    ]);
-    expect(warnings[0]).toContain('Run "openclaw doctor --fix"');
+    const warning = expectSingleWarningContaining(
+      warnings,
+      `plugins.load.paths: legacy bundled plugin path "${legacyPath}"`,
+    );
+    expect(warning).toContain('Run "openclaw doctor --fix"');
   });
 
   it("warns but skips auto-removal when plugin discovery has errors", async () => {
@@ -272,11 +318,12 @@ describe("doctor preview warnings", () => {
       doctorFixCommand: "openclaw doctor --fix",
     });
 
-    expect(warnings).toEqual([
-      expect.stringContaining('plugins.allow: stale plugin reference "acpx"'),
-    ]);
-    expect(warnings[0]).toContain("Auto-removal is paused");
-    expect(warnings[0]).toContain('rerun "openclaw doctor --fix"');
+    const warning = expectSingleWarningContaining(
+      warnings,
+      'plugins.allow: stale plugin reference "acpx"',
+    );
+    expect(warning).toContain("Auto-removal is paused");
+    expect(warning).toContain('rerun "openclaw doctor --fix"');
   });
 
   it("warns when a configured channel plugin is disabled explicitly", async () => {
@@ -301,12 +348,11 @@ describe("doctor preview warnings", () => {
       doctorFixCommand: "openclaw doctor --fix",
     });
 
-    expect(warnings).toEqual([
-      expect.stringContaining(
-        'channels.telegram: channel is configured, but plugin "telegram" is disabled by plugins.entries.telegram.enabled=false.',
-      ),
-    ]);
-    expect(warnings[0]).not.toContain("first-time setup mode");
+    const warning = expectSingleWarningContaining(
+      warnings,
+      'channels.telegram: channel is configured, but plugin "telegram" is disabled by plugins.entries.telegram.enabled=false.',
+    );
+    expect(warning).not.toContain("first-time setup mode");
   });
 
   it("warns when channel plugins are blocked globally", async () => {
@@ -327,11 +373,136 @@ describe("doctor preview warnings", () => {
       doctorFixCommand: "openclaw doctor --fix",
     });
 
-    expect(warnings).toEqual([
-      expect.stringContaining(
-        "channels.telegram: channel is configured, but plugins.enabled=false blocks channel plugins globally.",
-      ),
+    const warning = expectSingleWarningContaining(
+      warnings,
+      "channels.telegram: channel is configured, but plugins.enabled=false blocks channel plugins globally.",
+    );
+    expect(warning).not.toContain("first-time setup mode");
+  });
+
+  it("keeps global plugin-disable blocker warnings but omits stale plugin cleanup warnings", async () => {
+    manifestState.plugins = [channelManifest("telegram", "telegram")];
+
+    const warnings = await collectDoctorPreviewWarnings({
+      cfg: {
+        channels: {
+          telegram: {
+            botToken: "123:abc",
+            groupPolicy: "allowlist",
+          },
+        },
+        plugins: {
+          enabled: false,
+          allow: ["acpx"],
+          entries: {
+            acpx: { enabled: true },
+          },
+        },
+      },
+      doctorFixCommand: "openclaw doctor --fix",
+    });
+
+    expectSingleWarningContaining(
+      warnings,
+      "channels.telegram: channel is configured, but plugins.enabled=false blocks channel plugins globally.",
+    );
+    expect(warnings.join("\n")).not.toContain("stale plugin reference");
+  });
+
+  it("warns softly when default group visible replies need an unavailable message tool", () => {
+    const warnings = collectVisibleReplyToolPolicyWarnings({
+      channels: {
+        slack: {},
+      },
+      tools: {
+        allow: ["read"],
+      },
+    });
+
+    const warning = expectSingleWarningContaining(
+      warnings,
+      'messages.groupChat.visibleReplies defaults to "message_tool"',
+    );
+    expect(warning).toContain("message tool is unavailable");
+    expect(warning).toContain("falls back to automatic group/channel replies");
+  });
+
+  it("warns strongly when explicit group visible replies require an unavailable message tool", () => {
+    const warnings = collectVisibleReplyToolPolicyWarnings({
+      messages: {
+        groupChat: {
+          visibleReplies: "message_tool",
+        },
+      },
+      tools: {
+        profile: "coding",
+      },
+    });
+
+    const warning = expectSingleWarningContaining(
+      warnings,
+      'messages.groupChat.visibleReplies is set to "message_tool"',
+    );
+    expect(warning).toContain("normal replies may post to the source chat");
+    expect(warning).toContain('set messages.groupChat.visibleReplies to "automatic"');
+  });
+
+  it("warns for direct chats when global visible replies are tool-only but groups override automatic", () => {
+    const warnings = collectVisibleReplyToolPolicyWarnings({
+      messages: {
+        visibleReplies: "message_tool",
+        groupChat: {
+          visibleReplies: "automatic",
+        },
+      },
+      tools: {
+        allow: ["read"],
+      },
+    });
+
+    const warning = expectSingleWarningContaining(
+      warnings,
+      'messages.visibleReplies is set to "message_tool"',
+    );
+    expect(warning).toContain("automatic direct-chat replies");
+  });
+
+  it("warns separately for explicit global and group visible reply policy mismatches", () => {
+    const warnings = collectVisibleReplyToolPolicyWarnings({
+      messages: {
+        visibleReplies: "message_tool",
+        groupChat: {
+          visibleReplies: "message_tool",
+        },
+      },
+      tools: {
+        allow: ["read"],
+      },
+    });
+
+    expectWarningsContaining(warnings, [
+      'messages.groupChat.visibleReplies is set to "message_tool"',
+      'messages.visibleReplies is set to "message_tool"',
     ]);
-    expect(warnings[0]).not.toContain("first-time setup mode");
+  });
+
+  it("skips visible reply tool warnings when the message tool is available or default groups are unused", () => {
+    expect(
+      collectVisibleReplyToolPolicyWarnings({
+        channels: {
+          slack: {},
+        },
+        tools: {
+          profile: "messaging",
+        },
+      }),
+    ).toStrictEqual([]);
+    expect(
+      collectVisibleReplyToolPolicyWarnings({
+        tools: {
+          allow: ["read"],
+        },
+      }),
+    ).toStrictEqual([]);
   });
 });

@@ -91,11 +91,11 @@ async function runToolOnlyTurn(params: ToolOnlyTurnParams) {
     text = extractAssistantText(response);
   }
 
-  expect(toolCall).toBeTruthy();
   expect(text.length).toBe(0);
   if (!toolCall || toolCall.type !== "toolCall") {
     throw new Error("expected tool call");
   }
+  expect(toolCall.name).toBe(MCP_TOOL.name);
   return {
     prompt,
     response,
@@ -162,7 +162,7 @@ describeCacheLive("MCP-style prompt caching (live)", () => {
         provider: "openai",
         api: "openai-responses",
         envVar: "OPENCLAW_LIVE_OPENAI_CACHE_MODEL",
-        preferredModelIds: ["gpt-5.4-mini", "gpt-5.4", "gpt-5.4"],
+        preferredModelIds: ["gpt-5.5", "gpt-5.4-mini", "gpt-5.4"],
       });
       logLiveCache(`openai mcp-style model=${fixture.model.provider}/${fixture.model.id}`);
 

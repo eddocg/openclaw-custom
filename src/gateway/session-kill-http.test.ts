@@ -15,7 +15,11 @@ const killControlledSubagentRunMock = vi.fn();
 const killSubagentRunAdminMock = vi.fn();
 
 vi.mock("../config/config.js", () => ({
-  loadConfig: () => cfg,
+  getRuntimeConfig: () => cfg,
+}));
+
+vi.mock("../config/io.js", () => ({
+  getRuntimeConfig: () => cfg,
 }));
 
 vi.mock("./auth.js", () => ({
@@ -130,6 +134,24 @@ describe("POST /sessions/:sessionKey/kill", () => {
     });
     expect(killSubagentRunAdminMock).not.toHaveBeenCalled();
   });
+
+  it.each(["/sessions/%zz/kill", "/sessions/%20/kill"])(
+    "rejects invalid encoded session key %s without falling through",
+    async (pathname) => {
+      const response = await post(pathname);
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({
+        error: {
+          message: "invalid session key",
+          type: "invalid_request_error",
+        },
+      });
+      expect(authMock).not.toHaveBeenCalled();
+      expect(loadSessionEntryMock).not.toHaveBeenCalled();
+      expect(killSubagentRunAdminMock).not.toHaveBeenCalled();
+      expect(killControlledSubagentRunMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("kills a matching session via the admin kill helper using the canonical key", async () => {
     authMock.mockResolvedValueOnce({ ok: true, method: "trusted-proxy" });

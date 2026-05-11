@@ -64,7 +64,7 @@ describe("onboard auth provider config merges", () => {
       agents: {
         defaults: {
           models: {
-            "openai/gpt-5.4": { alias: "GPT" },
+            "openai/gpt-5.5": { alias: "GPT" },
           },
         },
       },
@@ -89,9 +89,45 @@ describe("onboard auth provider config merges", () => {
     });
 
     expect(next.agents?.defaults?.models).toEqual({
-      "openai/gpt-5.4": { alias: "GPT" },
+      "openai/gpt-5.5": { alias: "GPT" },
       ...agentModels,
     });
+  });
+
+  it("normalizes retired Google agent model keys when adding provider models", () => {
+    const cfg: OpenClawConfig = {
+      agents: {
+        defaults: {
+          models: {
+            "google/gemini-3-pro-preview": {
+              alias: "Gemini",
+              params: { thinkingLevel: "high" },
+            },
+          },
+        },
+      },
+    };
+
+    const next = applyProviderConfigWithDefaultModels(cfg, {
+      agentModels: {
+        "google/gemini-3.1-pro-preview": {
+          params: { serviceTier: "standard" },
+        },
+      },
+      providerId: "custom",
+      api: "openai-completions",
+      baseUrl: "https://new.example.com/v1",
+      defaultModels: [makeModel("model-b")],
+      defaultModelId: "model-b",
+    });
+
+    expect(next.agents?.defaults?.models).toEqual({
+      "google/gemini-3.1-pro-preview": {
+        alias: "Gemini",
+        params: { thinkingLevel: "high", serviceTier: "standard" },
+      },
+    });
+    expect(next.agents?.defaults?.models).not.toHaveProperty("google/gemini-3-pro-preview");
   });
 
   it("merges model catalogs without duplicating existing model ids", () => {
@@ -147,6 +183,19 @@ describe("onboard auth provider config merges", () => {
     ).toEqual({
       "custom/model-a": { alias: "Pinned" },
       "custom/model-b": {},
+    });
+  });
+
+  it("normalizes retired Google alias presets before emitting config", () => {
+    expect(
+      withAgentModelAliases(
+        {
+          "google/gemini-3-pro-preview": { alias: "Pinned" },
+        },
+        [{ modelRef: "google/gemini-3-pro-preview", alias: "Preset" }],
+      ),
+    ).toEqual({
+      "google/gemini-3.1-pro-preview": { alias: "Pinned" },
     });
   });
 

@@ -1,8 +1,7 @@
-import fs from "node:fs";
+import fsp from "node:fs/promises";
 import path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { SessionEntry, SessionHeader } from "@mariozechner/pi-coding-agent";
-import { SessionManager } from "@mariozechner/pi-coding-agent";
+import type { FileEntry, SessionEntry, SessionHeader } from "@mariozechner/pi-coding-agent";
 import { sanitizeDiagnosticPayload } from "../agents/payload-redaction.js";
 import { resolveStateDir } from "../config/paths.js";
 import {
@@ -24,7 +23,7 @@ import {
   resolveTrajectoryFilePath,
   resolveTrajectoryPointerFilePath,
   safeTrajectorySessionFileName,
-} from "./runtime.js";
+} from "./paths.js";
 import type {
   TrajectoryBundleManifest,
   TrajectoryEvent,
@@ -57,24 +56,116 @@ const MAX_TRAJECTORY_RUNTIME_EVENTS = 200_000;
 const MAX_TRAJECTORY_TOTAL_EVENTS = 250_000;
 const MAX_TRAJECTORY_SESSION_FILE_BYTES = 50 * 1024 * 1024;
 
-function parseJsonlFile<T>(
+function parseSessionEntries(content: string): FileEntry[] {
+  return content
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .flatMap((line) => {
+      try {
+        return [JSON.parse(line) as FileEntry];
+      } catch {
+        return [];
+      }
+    });
+}
+
+function migrateLegacySessionEntries(entries: FileEntry[]): void {
+  const header = entries.find((entry): entry is SessionHeader => entry.type === "session");
+  const version = header?.version ?? 1;
+  if (version < 2) {
+    let previousId: string | null = null;
+    let index = 0;
+    for (const entry of entries) {
+      if (entry.type === "session") {
+        entry.version = 2;
+        continue;
+      }
+      const mutable = entry as unknown as Record<string, unknown>;
+      if (typeof mutable.id !== "string") {
+        mutable.id = `legacy-${index++}`;
+      }
+      mutable.parentId = previousId;
+      const entryId = mutable.id;
+      previousId = typeof entryId === "string" ? entryId : null;
+      if (entry.type === "compaction" && typeof mutable.firstKeptEntryIndex === "number") {
+        const target = entries[mutable.firstKeptEntryIndex];
+        if (target && target.type !== "session") {
+          mutable.firstKeptEntryId = (target as unknown as Record<string, unknown>).id;
+        }
+        delete mutable.firstKeptEntryIndex;
+      }
+    }
+  }
+  if (version < 3) {
+    for (const entry of entries) {
+      if (entry.type === "session") {
+        entry.version = 3;
+        continue;
+      }
+      if (entry.type === "message") {
+        const message = (entry as { message?: { role?: string } }).message;
+        if (message?.role === "hookMessage") {
+          message.role = "custom";
+        }
+      }
+    }
+  }
+}
+
+async function readSessionBranch(filePath: string): Promise<{
+  header: SessionHeader | null;
+  leafId: string | null;
+  branchEntries: SessionEntry[];
+}> {
+  const fileEntries = parseSessionEntries(await fsp.readFile(filePath, "utf8"));
+  migrateLegacySessionEntries(fileEntries);
+  const header =
+    fileEntries.find((entry): entry is SessionHeader => entry.type === "session") ?? null;
+  const entries = fileEntries.filter(
+    (entry): entry is SessionEntry =>
+      entry.type !== "session" &&
+      typeof (entry as { id?: unknown }).id === "string" &&
+      (typeof (entry as { timestamp?: unknown }).timestamp === "string" ||
+        typeof (entry as { timestamp?: unknown }).timestamp === "number"),
+  );
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  const leafId = entries.at(-1)?.id ?? null;
+  const branchEntries: SessionEntry[] = [];
+  let current = leafId ? byId.get(leafId) : undefined;
+  while (current) {
+    branchEntries.unshift(current);
+    current = current.parentId ? byId.get(current.parentId) : undefined;
+  }
+  return { header, leafId, branchEntries };
+}
+
+async function parseJsonlFile<T>(
   filePath: string,
   params: {
     maxBytes: number;
     maxEvents: number;
     validate?: (value: unknown) => value is T;
   },
-): T[] {
-  if (!fs.existsSync(filePath)) {
+): Promise<T[]> {
+  let stat;
+  try {
+    stat = await fsp.stat(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+  if (!stat.isFile()) {
     return [];
   }
-  const stat = fs.statSync(filePath);
   if (stat.size > params.maxBytes) {
     throw new Error(
       `Trajectory runtime file is too large to export (${stat.size} bytes; limit ${params.maxBytes})`,
     );
   }
-  const content = fs.readFileSync(filePath, "utf8");
+  const content = await fsp.readFile(filePath, "utf8");
   const rows = content
     .split(/\r?\n/u)
     .map((line) => line.trim())
@@ -126,26 +217,29 @@ function isRuntimeTrajectoryEventForSession(
   );
 }
 
-function isRegularNonSymlinkFile(filePath: string): boolean {
+async function isRegularNonSymlinkFile(filePath: string): Promise<boolean> {
   try {
-    const linkStat = fs.lstatSync(filePath);
+    const linkStat = await fsp.lstat(filePath);
     if (linkStat.isSymbolicLink() || !linkStat.isFile()) {
       return false;
     }
-    const stat = fs.statSync(filePath);
+    const stat = await fsp.stat(filePath);
     return stat.isFile() && stat.dev === linkStat.dev && stat.ino === linkStat.ino;
   } catch {
     return false;
   }
 }
 
-function readRuntimePointerFile(sessionFile: string, sessionId: string): string | undefined {
+async function readRuntimePointerFile(
+  sessionFile: string,
+  sessionId: string,
+): Promise<string | undefined> {
   const pointerPath = resolveTrajectoryPointerFilePath(sessionFile);
-  if (!isRegularNonSymlinkFile(pointerPath)) {
+  if (!(await isRegularNonSymlinkFile(pointerPath))) {
     return undefined;
   }
   try {
-    const parsed = JSON.parse(fs.readFileSync(pointerPath, "utf8")) as unknown;
+    const parsed = JSON.parse(await fsp.readFile(pointerPath, "utf8")) as unknown;
     if (!isRecord(parsed)) {
       return undefined;
     }
@@ -170,16 +264,16 @@ function readRuntimePointerFile(sessionFile: string, sessionId: string): string 
   }
 }
 
-function resolveTrajectoryRuntimeFile(params: {
+async function resolveTrajectoryRuntimeFile(params: {
   runtimeFile?: string;
   sessionFile: string;
   sessionId: string;
-}): string | undefined {
+}): Promise<string | undefined> {
   if (params.runtimeFile) {
     return params.runtimeFile;
   }
   const candidates = [
-    readRuntimePointerFile(params.sessionFile, params.sessionId),
+    await readRuntimePointerFile(params.sessionFile, params.sessionId),
     resolveTrajectoryFilePath({
       env: {},
       sessionFile: params.sessionFile,
@@ -190,7 +284,12 @@ function resolveTrajectoryRuntimeFile(params: {
       sessionId: params.sessionId,
     }),
   ].filter((candidate): candidate is string => Boolean(candidate));
-  return candidates.find((candidate) => isRegularNonSymlinkFile(candidate));
+  for (const candidate of candidates) {
+    if (await isRegularNonSymlinkFile(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
 }
 
 function normalizeTimestamp(value: unknown): string {
@@ -646,6 +745,8 @@ function buildArtifactsCapture(params: {
     idleTimedOut: runtimeArtifacts?.idleTimedOut ?? runtimeEnd?.idleTimedOut,
     timedOutDuringCompaction:
       runtimeArtifacts?.timedOutDuringCompaction ?? runtimeEnd?.timedOutDuringCompaction,
+    timedOutDuringToolExecution:
+      runtimeArtifacts?.timedOutDuringToolExecution ?? runtimeEnd?.timedOutDuringToolExecution,
     promptError:
       runtimeArtifacts?.promptError ?? runtimeEnd?.promptError ?? runtimeCompletion?.promptError,
     promptErrorSource: runtimeArtifacts?.promptErrorSource ?? runtimeCompletion?.promptErrorSource,
@@ -731,34 +832,31 @@ export function resolveDefaultTrajectoryExportDir(params: {
   );
 }
 
-export function exportTrajectoryBundle(params: BuildTrajectoryBundleParams): {
+export async function exportTrajectoryBundle(params: BuildTrajectoryBundleParams): Promise<{
   manifest: TrajectoryBundleManifest;
   outputDir: string;
   events: TrajectoryEvent[];
   header: SessionHeader | null;
   runtimeFile?: string;
   supplementalFiles: string[];
-} {
+}> {
   const redaction = buildTrajectoryExportRedaction({
     workspaceDir: params.workspaceDir,
   });
-  const sessionStat = fs.statSync(params.sessionFile);
+  const sessionStat = await fsp.stat(params.sessionFile);
   if (sessionStat.size > MAX_TRAJECTORY_SESSION_FILE_BYTES) {
     throw new Error(
       `Trajectory session file is too large to export (${sessionStat.size} bytes; limit ${MAX_TRAJECTORY_SESSION_FILE_BYTES})`,
     );
   }
-  const sessionManager = SessionManager.open(params.sessionFile);
-  const header = sessionManager.getHeader();
-  const leafId = sessionManager.getLeafId();
-  const branchEntries = sessionManager.getBranch(leafId ?? undefined);
-  const runtimeFile = resolveTrajectoryRuntimeFile({
+  const { header, leafId, branchEntries } = await readSessionBranch(params.sessionFile);
+  const runtimeFile = await resolveTrajectoryRuntimeFile({
     runtimeFile: params.runtimeFile,
     sessionFile: params.sessionFile,
     sessionId: params.sessionId,
   });
   const runtimeEvents = runtimeFile
-    ? parseJsonlFile<TrajectoryEvent>(runtimeFile, {
+    ? await parseJsonlFile<TrajectoryEvent>(runtimeFile, {
         maxBytes: TRAJECTORY_RUNTIME_FILE_MAX_BYTES,
         maxEvents: MAX_TRAJECTORY_RUNTIME_EVENTS,
         validate: (value): value is TrajectoryEvent =>
@@ -796,7 +894,7 @@ export function exportTrajectoryBundle(params: BuildTrajectoryBundleParams): {
     sourceFiles: {
       session: maybeRedactPathString(params.sessionFile, redaction),
       runtime:
-        runtimeFile && isRegularNonSymlinkFile(runtimeFile)
+        runtimeFile && (await isRegularNonSymlinkFile(runtimeFile))
           ? maybeRedactPathString(runtimeFile, redaction)
           : undefined,
     },
@@ -875,7 +973,7 @@ export function exportTrajectoryBundle(params: BuildTrajectoryBundleParams): {
   const contents: DiagnosticSupportBundleContent[] = [...supportBundleContents(files)];
   manifest.contents = contents;
 
-  writeSupportBundleDirectory({
+  await writeSupportBundleDirectory({
     outputDir: params.outputDir,
     files: [jsonSupportBundleFile("manifest.json", manifest), ...files],
   });
@@ -885,7 +983,8 @@ export function exportTrajectoryBundle(params: BuildTrajectoryBundleParams): {
     outputDir: params.outputDir,
     events,
     header,
-    runtimeFile: runtimeFile && isRegularNonSymlinkFile(runtimeFile) ? runtimeFile : undefined,
+    runtimeFile:
+      runtimeFile && (await isRegularNonSymlinkFile(runtimeFile)) ? runtimeFile : undefined,
     supplementalFiles,
   };
 }

@@ -15,10 +15,21 @@ const fetchChannelMessageMock = vi.hoisted(() => vi.fn());
 const fetchThreadRepliesMock = vi.hoisted(() => vi.fn(async () => []));
 const resolveTeamGroupIdMock = vi.hoisted(() => vi.fn(async () => "group-1"));
 
-vi.mock("../graph-thread.js", async () => {
-  const actual = await vi.importActual<typeof import("../graph-thread.js")>("../graph-thread.js");
+vi.mock("../graph-thread.js", () => {
+  const stripHtmlFromTeamsMessage = (html: string) =>
+    html
+      .replace(/<at[^>]*>(.*?)<\/at>/gi, "@$1")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&nbsp;/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
   return {
-    ...actual,
+    stripHtmlFromTeamsMessage,
     resolveTeamGroupId: resolveTeamGroupIdMock,
     fetchChannelMessage: fetchChannelMessageMock,
     fetchThreadReplies: fetchThreadRepliesMock,
@@ -76,10 +87,12 @@ describe("msteams thread parent context injection", () => {
     } as unknown as Parameters<typeof handler>[0]);
 
     const parentCall = findParentSystemEventCall(enqueueSystemEvent);
-    expect(parentCall).toBeDefined();
-    expect(parentCall?.[0]).toBe("Replying to @Alice: Can someone investigate the latency spike?");
-    expect(parentCall?.[1]?.contextKey).toContain("msteams:thread-parent:");
-    expect(parentCall?.[1]?.contextKey).toContain("thread-root-123");
+    if (!parentCall) {
+      throw new Error("expected parent thread system event");
+    }
+    expect(parentCall[0]).toBe("Replying to @Alice: Can someone investigate the latency spike?");
+    expect(parentCall[1]?.contextKey).toContain("msteams:thread-parent:");
+    expect(parentCall[1]?.contextKey).toContain("thread-root-123");
   });
 
   it("caches parent fetches across thread replies in the same session", async () => {

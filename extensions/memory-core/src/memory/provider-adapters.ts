@@ -12,6 +12,8 @@ import { formatErrorMessage } from "../dreaming-shared.js";
 import { filterUnregisteredMemoryEmbeddingProviderAdapters } from "./provider-adapter-registration.js";
 import { openaiCodexEmbeddingProvider } from "./provider-openai-codex-embeddings.js";
 
+const NODE_LLAMA_CPP_RUNTIME_PACKAGE = "node-llama-cpp";
+
 export type BuiltinMemoryEmbeddingProviderDoctorMetadata = {
   providerId: string;
   authProviderId: string;
@@ -25,7 +27,7 @@ function isNodeLlamaCppMissing(err: unknown): boolean {
     return false;
   }
   const code = (err as Error & { code?: unknown }).code;
-  return code === "ERR_MODULE_NOT_FOUND" && err.message.includes("node-llama-cpp");
+  return code === "ERR_MODULE_NOT_FOUND" && err.message.includes(NODE_LLAMA_CPP_RUNTIME_PACKAGE);
 }
 
 function listRemoteEmbeddingSetupHints(): string[] {
@@ -54,11 +56,11 @@ function formatLocalSetupError(err: unknown): string {
         : undefined,
     missing && detail ? `Detail: ${detail}` : null,
     "To enable local embeddings:",
-    "1) Use Node 24 (recommended for installs/updates; Node 22 LTS, currently 22.14+, remains supported)",
+    "1) Use Node 24 (recommended for installs/updates; Node 22 LTS, currently 22.16+, remains supported)",
     missing
-      ? "2) Reinstall OpenClaw (this should install node-llama-cpp): npm i -g openclaw@latest"
+      ? `2) Install ${NODE_LLAMA_CPP_RUNTIME_PACKAGE} next to the OpenClaw package or source checkout`
       : null,
-    "3) If you use pnpm: pnpm approve-builds (select node-llama-cpp), then pnpm rebuild node-llama-cpp",
+    `3) If you use pnpm: pnpm approve-builds (select ${NODE_LLAMA_CPP_RUNTIME_PACKAGE}), then pnpm rebuild ${NODE_LLAMA_CPP_RUNTIME_PACKAGE}`,
     ...listRemoteEmbeddingSetupHints(),
   ]
     .filter(Boolean)
@@ -98,6 +100,8 @@ const localAdapter: MemoryEmbeddingProviderAdapter = {
       provider,
       runtime: {
         id: "local",
+        inlineQueryTimeoutMs: 5 * 60_000,
+        inlineBatchTimeoutMs: 10 * 60_000,
         cacheKeyData: {
           provider: "local",
           model: provider.model,
@@ -107,7 +111,6 @@ const localAdapter: MemoryEmbeddingProviderAdapter = {
   },
 };
 
-//export const builtinMemoryEmbeddingProviderAdapters = [localAdapter] as const;
 export const builtinMemoryEmbeddingProviderAdapters = [
   localAdapter,
   openaiCodexEmbeddingProvider,
@@ -115,7 +118,7 @@ export const builtinMemoryEmbeddingProviderAdapters = [
 
 export { DEFAULT_LOCAL_MODEL };
 
-export function getBuiltinMemoryEmbeddingProviderAdapter(
+function getBuiltinMemoryEmbeddingProviderAdapter(
   id: string,
 ): MemoryEmbeddingProviderAdapter | undefined {
   return listMemoryEmbeddingProviders().find((adapter) => adapter.id === id);
@@ -168,4 +171,4 @@ export function listBuiltinAutoSelectMemoryEmbeddingProviderDoctorMetadata(): Ar
     });
 }
 
-export { canAutoSelectLocal, formatLocalSetupError };
+export { canAutoSelectLocal };

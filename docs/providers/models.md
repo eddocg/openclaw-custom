@@ -3,10 +3,8 @@ summary: "Model providers (LLMs) supported by OpenClaw"
 read_when:
   - You want to choose a model provider
   - You want quick setup examples for LLM auth + model selection
-title: "Model Provider Quickstart"
+title: "Model provider quickstart"
 ---
-
-# Model Providers
 
 OpenClaw can use many LLM providers. Pick one, authenticate, then set the default
 model as `provider/model`.
@@ -31,6 +29,7 @@ model as `provider/model`.
 - [Chutes](/providers/chutes)
 - [ComfyUI](/providers/comfy)
 - [Cloudflare AI Gateway](/providers/cloudflare-ai-gateway)
+- [DeepInfra](/providers/deepinfra)
 - [fal](/providers/fal)
 - [Fireworks](/providers/fireworks)
 - [GLM models](/providers/glm)
@@ -58,3 +57,9 @@ model as `provider/model`.
 
 For the full provider catalog (xAI, Groq, Mistral, etc.) and advanced configuration,
 see [Model providers](/concepts/model-providers).
+
+## Related
+
+- [Model selection](/concepts/model-providers)
+- [Model failover](/concepts/model-failover)
+- [Models CLI](/cli/models)

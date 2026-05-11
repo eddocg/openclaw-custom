@@ -1,4 +1,6 @@
+import { normalizeProviderId } from "../agents/provider-id.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { registerBuiltInMemoryEmbeddingProviders } from "../plugin-sdk/memory-core-bundled-runtime.js";
 import {
   resolvePluginCapabilityProvider,
   resolvePluginCapabilityProviders,
@@ -8,7 +10,6 @@ import {
   listRegisteredMemoryEmbeddingProviders,
   type MemoryEmbeddingProviderAdapter,
 } from "./memory-embedding-providers.js";
-import { registerBuiltInMemoryEmbeddingProviders } from "../plugin-sdk/memory-core-bundled-runtime.js";
 import { registerMemoryEmbeddingProvider } from "./memory-embedding-providers.js";
 
 export { listRegisteredMemoryEmbeddingProviders };
@@ -44,19 +45,56 @@ function ensureMemoryProvidersInitialized() {
   });
 }
 
+function readConfiguredProviderApiId(providerId: string, cfg?: OpenClawConfig): string | undefined {
+  const providers = cfg?.models?.providers;
+  if (!providers) {
+    return undefined;
+  }
+  const normalized = normalizeProviderId(providerId);
+  const providerConfig =
+    providers[providerId] ??
+    Object.entries(providers).find(
+      ([candidateId]) => normalizeProviderId(candidateId) === normalized,
+    )?.[1];
+  const api = providerConfig?.api?.trim();
+  if (!api) {
+    return undefined;
+  }
+  const normalizedApi = normalizeProviderId(api);
+  return normalizedApi && normalizedApi !== normalized ? normalizedApi : undefined;
+}
+
+function resolveMemoryEmbeddingProviderLookupIds(id: string, cfg?: OpenClawConfig): string[] {
+  const ids = [id];
+  const apiId = readConfiguredProviderApiId(id, cfg);
+  if (apiId && !ids.some((candidate) => normalizeProviderId(candidate) === apiId)) {
+    ids.push(apiId);
+  }
+  return ids;
+}
+
 export function getMemoryEmbeddingProvider(
   id: string,
   cfg?: OpenClawConfig,
 ): MemoryEmbeddingProviderAdapter | undefined {
   ensureMemoryProvidersInitialized();
 
-  const registered = getRegisteredMemoryEmbeddingProvider(id);
-  if (registered) {
-    return registered.adapter;
+  const ids = resolveMemoryEmbeddingProviderLookupIds(id, cfg);
+  for (const candidateId of ids) {
+    const registered = getRegisteredMemoryEmbeddingProvider(candidateId);
+    if (registered) {
+      return registered.adapter;
+    }
   }
-  return resolvePluginCapabilityProvider({
-    key: "memoryEmbeddingProviders",
-    providerId: id,
-    cfg,
-  });
+  for (const candidateId of ids) {
+    const provider = resolvePluginCapabilityProvider({
+      key: "memoryEmbeddingProviders",
+      providerId: candidateId,
+      cfg,
+    });
+    if (provider) {
+      return provider;
+    }
+  }
+  return undefined;
 }
