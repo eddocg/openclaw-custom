@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LiveSessionModelSwitchError } from "../../agents/live-model-switch-error.js";
 import type { SessionEntry } from "../../config/sessions.js";
@@ -22,10 +24,14 @@ const state = vi.hoisted(() => ({
   isCliProviderMock: vi.fn((_: unknown) => false),
   isInternalMessageChannelMock: vi.fn((_: unknown) => false),
   createBlockReplyDeliveryHandlerMock: vi.fn(),
+  memoryCandidateQueueEnqueueMock: vi.fn(),
 }));
 
 const GENERIC_RUN_FAILURE_TEXT =
   "⚠️ Something went wrong while processing your request. Please try again, or use /new to start a fresh session.";
+const CANONICAL_REMEMBER_ACKNOWLEDGMENT =
+  "Canonical memory candidate queued for review. No canonical memory was modified.";
+const SOURCE_FILE = fileURLToPath(new URL("./agent-runner-execution.ts", import.meta.url));
 
 function makeTestModel(id: string, contextTokens: number): ModelDefinitionConfig {
   return {
@@ -115,6 +121,21 @@ vi.mock("../../infra/agent-events.js", async () => {
     registerAgentRunContext: vi.fn(),
   };
 });
+
+vi.mock("../../logging/subsystem.js", () => ({
+  createSubsystemLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
+
+vi.mock("../../memory/memory-candidate-queue-adapter.js", () => ({
+  createMemoryCandidateQueueAdapter: () => ({
+    enqueue: state.memoryCandidateQueueEnqueueMock,
+  }),
+}));
 
 vi.mock("../../runtime.js", () => ({
   defaultRuntime: {
@@ -359,12 +380,13 @@ function expectBlockReplyCall(
 }
 
 function createMinimalRunAgentTurnParams(overrides?: {
+  commandBody?: string;
   followupRun?: FollowupRun;
   opts?: GetReplyOptions;
   sessionCtx?: TemplateContext;
 }) {
   return {
-    commandBody: "fix it",
+    commandBody: overrides?.commandBody ?? "fix it",
     followupRun: overrides?.followupRun ?? createFollowupRun(),
     sessionCtx:
       overrides?.sessionCtx ??
@@ -478,6 +500,11 @@ describe("runAgentTurnWithFallback", () => {
     state.isInternalMessageChannelMock.mockReturnValue(false);
     state.createBlockReplyDeliveryHandlerMock.mockReset();
     state.createBlockReplyDeliveryHandlerMock.mockReturnValue(undefined);
+    state.memoryCandidateQueueEnqueueMock.mockReset();
+    state.memoryCandidateQueueEnqueueMock.mockResolvedValue({
+      status: "skipped:no_trigger",
+    });
+    delete process.env.OPENCLAW_MEMORY_CANDIDATE_QUEUE_ENABLED;
     state.runWithModelFallbackMock.mockImplementation(async (params: FallbackRunnerParams) => ({
       result: await params.run("anthropic", "claude"),
       provider: "anthropic",
@@ -487,7 +514,135 @@ describe("runAgentTurnWithFallback", () => {
   });
 
   afterEach(() => {
+    delete process.env.OPENCLAW_MEMORY_CANDIDATE_QUEUE_ENABLED;
     vi.clearAllMocks();
+  });
+
+  it("diverts explicit canonical remember turns before CLI execution", async () => {
+    process.env.OPENCLAW_MEMORY_CANDIDATE_QUEUE_ENABLED = "true";
+    state.isCliProviderMock.mockReturnValue(true);
+    state.memoryCandidateQueueEnqueueMock.mockResolvedValueOnce({
+      status: "succeeded",
+      candidateId: "candidate-1",
+    });
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    const followupRun = createFollowupRun();
+    followupRun.run.provider = "codex-cli";
+    followupRun.run.model = "gpt-5.5";
+    followupRun.run.messageProvider = "discord";
+
+    const result = await runAgentTurnWithFallback(
+      createMinimalRunAgentTurnParams({
+        commandBody:
+          "remember this canonical: never auto-merge governed proposal bridge validations",
+        followupRun,
+        sessionCtx: {
+          Provider: "discord",
+          MessageSid: "discord-message-1",
+        } as unknown as TemplateContext,
+        opts: { runId: "run-canonical-1" },
+      }) satisfies Parameters<typeof runAgentTurnWithFallback>[0],
+    );
+
+    expect(state.memoryCandidateQueueEnqueueMock).toHaveBeenCalledTimes(1);
+    expect(state.memoryCandidateQueueEnqueueMock).toHaveBeenCalledWith(
+      "queue memory: Remember this canonical operational rule: never auto-merge governed proposal bridge validations",
+      {
+        source: "discord",
+        sessionKey: "main",
+        requestId: "run-canonical-1",
+        provider: "discord",
+        messageId: "discord-message-1",
+      },
+    );
+    expect(state.runWithModelFallbackMock).not.toHaveBeenCalled();
+    expect(state.runCliAgentMock).not.toHaveBeenCalled();
+    expect(state.runEmbeddedPiAgentMock).not.toHaveBeenCalled();
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      expect(result.runResult.payloads?.[0]?.text).toBe(CANONICAL_REMEMBER_ACKNOWLEDGMENT);
+      expect(result.runResult.meta?.finalAssistantVisibleText).toBe(
+        CANONICAL_REMEMBER_ACKNOWLEDGMENT,
+      );
+    }
+  });
+
+  it("preserves the CLI path when canonical diversion does not match", async () => {
+    process.env.OPENCLAW_MEMORY_CANDIDATE_QUEUE_ENABLED = "true";
+    state.isCliProviderMock.mockReturnValue(true);
+    state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => ({
+      result: await params.run("codex-cli", "gpt-5.5"),
+      provider: "codex-cli",
+      model: "gpt-5.5",
+      attempts: [],
+    }));
+    state.runCliAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "normal cli reply" }],
+      meta: {},
+    });
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    const followupRun = createFollowupRun();
+    followupRun.run.provider = "codex-cli";
+    followupRun.run.model = "gpt-5.5";
+
+    const result = await runAgentTurnWithFallback(
+      createMinimalRunAgentTurnParams({
+        followupRun,
+        opts: { runId: "run-cli-fallthrough" },
+      }) satisfies Parameters<typeof runAgentTurnWithFallback>[0],
+    );
+
+    expect(state.memoryCandidateQueueEnqueueMock).not.toHaveBeenCalled();
+    expect(state.runWithModelFallbackMock).toHaveBeenCalledTimes(1);
+    expect(state.runCliAgentMock).toHaveBeenCalledTimes(1);
+    expect(state.runEmbeddedPiAgentMock).not.toHaveBeenCalled();
+    expect(result.kind).toBe("success");
+  });
+
+  it("preserves the CLI path when the candidate queue is disabled", async () => {
+    state.isCliProviderMock.mockReturnValue(true);
+    state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => ({
+      result: await params.run("codex-cli", "gpt-5.5"),
+      provider: "codex-cli",
+      model: "gpt-5.5",
+      attempts: [],
+    }));
+    state.runCliAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "normal cli reply" }],
+      meta: {},
+    });
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    const followupRun = createFollowupRun();
+    followupRun.run.provider = "codex-cli";
+    followupRun.run.model = "gpt-5.5";
+
+    await runAgentTurnWithFallback(
+      createMinimalRunAgentTurnParams({
+        commandBody: "remember this canonical: queue disabled preserves CLI path",
+        followupRun,
+        opts: { runId: "run-cli-disabled" },
+      }) satisfies Parameters<typeof runAgentTurnWithFallback>[0],
+    );
+
+    expect(state.memoryCandidateQueueEnqueueMock).not.toHaveBeenCalled();
+    expect(state.runWithModelFallbackMock).toHaveBeenCalledTimes(1);
+    expect(state.runCliAgentMock).toHaveBeenCalledTimes(1);
+    expect(state.runEmbeddedPiAgentMock).not.toHaveBeenCalled();
+  });
+
+  it("does not introduce direct MEMORY.md writes or tool exposure in the diverted block", async () => {
+    const source = await readFile(SOURCE_FILE, "utf8");
+    const divertedBlock = source.match(
+      /if\s*\(\s*canonicalDivertResult\.diverted\s*\)\s*\{[\s\S]*?return\s*\{[\s\S]*?directlySentBlockKeys,\s*\};\s*\}/,
+    )?.[0];
+    expect(divertedBlock).toBeDefined();
+    expect(divertedBlock ?? "").not.toMatch(/MEMORY\.md/);
+    expect(divertedBlock ?? "").not.toMatch(/memory_flush/);
+    expect(divertedBlock ?? "").not.toMatch(/writeFile|appendFile/);
+    expect(divertedBlock ?? "").not.toMatch(/runCliAgent|runEmbeddedPiAgent/);
   });
 
   it("forwards the static extra system prompt to CLI backends", async () => {

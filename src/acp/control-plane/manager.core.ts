@@ -751,12 +751,72 @@ export class AcpSessionManager {
         if (taskContext) {
           this.createBackgroundTaskRecord(taskContext, turnStartedAt);
         }
+        // Governed canonical-remember diversion. Runs BEFORE semantic
+        // ingest, memory injection, and runtime turn execution so an
+        // explicit `(remember|save) this canonical: ...` message routes
+        // through the candidate queue adapter instead of reaching the model
+        // path. Disabled when the candidate queue env flag is off; never
+        // matches generic `remember this` / `save this` traffic or the
+        // existing `queue memory:` trigger (those keep their current seams).
+        const memoryIngestDebug = isAcpMemoryDebugEnabled(process.env);
+        if (memoryIngestDebug) {
+          acpMemoryIngestLog.info(
+            "[canonical-remember-bridge] seam=acp-manager divert-start",
+          );
+        }
+        const canonicalDivertResult = await this.deps.canonicalRememberBridge.divert(
+          input.text,
+          {
+            source: "acp",
+            sessionKey,
+            requestId: input.requestId,
+          },
+        );
+        if (memoryIngestDebug) {
+          acpMemoryIngestLog.info(
+            `[canonical-remember-bridge] seam=acp-manager divert-result diverted=${canonicalDivertResult.diverted}`,
+          );
+        }
+        if (canonicalDivertResult.diverted) {
+          acpMemoryIngestLog.info(
+            "[canonical-remember-bridge] seam=acp-manager short-circuit reason=canonical-diverted",
+          );
+          if (input.onEvent) {
+            await input.onEvent({
+              type: "text_delta",
+              text: canonicalDivertResult.acknowledgment,
+              stream: "output",
+            });
+            await input.onEvent({
+              type: "done",
+              stopReason: "canonical_remember_diverted",
+            });
+          }
+          if (taskContext) {
+            this.markBackgroundTaskTerminal(taskContext.runId, {
+              sessionKey,
+              status: "succeeded",
+              endedAt: Date.now(),
+              lastEventAt: Date.now(),
+              error: undefined,
+              progressSummary: canonicalDivertResult.acknowledgment,
+              terminalSummary: canonicalDivertResult.acknowledgment,
+              terminalOutcome: "succeeded",
+            });
+          }
+          await this.setSessionState({
+            cfg: input.cfg,
+            sessionKey,
+            state: "idle",
+            clearLastError: true,
+          });
+          return;
+        }
         // Best-effort semantic-memory ingest. The adapter no-ops unless
         // memory is enabled and the raw user text starts with a "remember
         // /save this" trigger. The hybrid grace+detach contract bounds the
         // awaited delay; pre-wrapped prompts skip ingest to avoid
         // double-ingest on retries.
-        const memoryIngestDebug = isAcpMemoryDebugEnabled(process.env);
         if (memoryIngestDebug) {
           acpMemoryIngestLog.info("[memory-ingest] seam=acp-manager ingest-start");
         }
