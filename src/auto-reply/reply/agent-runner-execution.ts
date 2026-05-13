@@ -42,6 +42,9 @@ import {
 import { logVerbose } from "../../globals.js";
 import { emitAgentEvent, onAgentEvent, registerAgentRunContext } from "../../infra/agent-events.js";
 import { formatErrorMessage } from "../../infra/errors.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { createCanonicalRememberBridge } from "../../memory/canonical-remember-bridge.js";
+import { createMemoryCandidateQueueAdapter } from "../../memory/memory-candidate-queue-adapter.js";
 import { CommandLaneClearedError, GatewayDrainingError } from "../../process/command-queue.js";
 import { CommandLane } from "../../process/lanes.js";
 import { defaultRuntime } from "../../runtime.js";
@@ -94,6 +97,7 @@ const GPT_CHAT_BREVITY_ACK_MAX_CHARS = 420;
 const GPT_CHAT_BREVITY_ACK_MAX_SENTENCES = 3;
 const GPT_CHAT_BREVITY_SOFT_MAX_CHARS = 900;
 const GPT_CHAT_BREVITY_SOFT_MAX_SENTENCES = 6;
+const autoReplyAgentRunnerLog = createSubsystemLogger("auto-reply/agent-runner");
 
 function readApprovalScopeValue(value: unknown): "turn" | "session" | undefined {
   return value === "turn" || value === "session" ? value : undefined;
@@ -1120,6 +1124,80 @@ export async function runAgentTurnWithFallback(params: {
         };
 
   const runId = params.opts?.runId ?? crypto.randomUUID();
+  const canonicalRememberBridge = createCanonicalRememberBridge({
+    adapter: createMemoryCandidateQueueAdapter({
+      log: (message) => {
+        if (
+          message.startsWith("[memory-candidate-queue]") ||
+          message.startsWith("[canonical-remember-bridge]")
+        ) {
+          autoReplyAgentRunnerLog.info(message);
+        } else {
+          autoReplyAgentRunnerLog.debug(message);
+        }
+      },
+    }),
+    log: (message) => autoReplyAgentRunnerLog.info(message),
+  });
+  autoReplyAgentRunnerLog.info(
+    "[canonical-remember-bridge] seam=auto-reply-agent-runner divert-start",
+  );
+  const canonicalDivertResult = await canonicalRememberBridge.divert(params.commandBody, {
+    source:
+      params.followupRun.run.messageProvider ??
+      params.sessionCtx.Provider ??
+      params.sessionCtx.Surface ??
+      "auto-reply",
+    sessionKey: params.sessionKey ?? params.followupRun.run.sessionKey,
+    requestId: runId,
+    provider: params.followupRun.run.messageProvider ?? params.sessionCtx.Provider,
+    messageId:
+      typeof params.sessionCtx.MessageSidFull === "string"
+        ? params.sessionCtx.MessageSidFull
+        : typeof params.sessionCtx.MessageSid === "string"
+          ? params.sessionCtx.MessageSid
+          : undefined,
+  });
+  autoReplyAgentRunnerLog.info(
+    `[canonical-remember-bridge] seam=auto-reply-agent-runner divert-result diverted=${canonicalDivertResult.diverted}`,
+  );
+  if (canonicalDivertResult.diverted) {
+    autoReplyAgentRunnerLog.info(
+      "[canonical-remember-bridge] seam=auto-reply-agent-runner short-circuit reason=canonical-diverted",
+    );
+    return {
+      kind: "success",
+      runId,
+      runResult: {
+        payloads: [{ text: canonicalDivertResult.acknowledgment }],
+        meta: {
+          durationMs: 0,
+          finalAssistantVisibleText: canonicalDivertResult.acknowledgment,
+          finalAssistantRawText: canonicalDivertResult.acknowledgment,
+          executionTrace: {
+            winnerProvider: params.followupRun.run.provider,
+            winnerModel: params.followupRun.run.model,
+            attempts: [],
+            fallbackUsed: false,
+          },
+          completion: {
+            finishReason: "stop",
+            stopReason: "canonical_remember_diverted",
+            refusal: false,
+          },
+          agentMeta: {
+            sessionId: params.followupRun.run.sessionId,
+            provider: params.followupRun.run.provider,
+            model: params.followupRun.run.model,
+          },
+        },
+      },
+      fallbackAttempts: [],
+      didLogHeartbeatStrip,
+      autoCompactionCount,
+      directlySentBlockKeys,
+    };
+  }
   const replyMediaContext =
     params.replyMediaContext ??
     createReplyMediaContext({
