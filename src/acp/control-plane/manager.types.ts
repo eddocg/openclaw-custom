@@ -7,6 +7,10 @@ import type {
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import {
+  createCanonicalRememberBridge,
+  type CanonicalRememberBridge,
+} from "../../memory/canonical-remember-bridge.js";
+import {
   createMemoryCandidateQueueAdapter,
   type MemoryCandidateQueueAdapter,
 } from "../../memory/memory-candidate-queue-adapter.js";
@@ -174,6 +178,15 @@ export type AcpSessionManagerDeps = {
    * to a fail-open adapter gated by `OPENCLAW_MEMORY_CANDIDATE_QUEUE_ENABLED`.
    */
   memoryCandidateQueue: MemoryCandidateQueueAdapter;
+  /**
+   * Governed canonical-remember bridge. Runs BEFORE semantic ingest and
+   * memory injection: when the candidate queue is enabled and the raw user
+   * text matches the explicit `(remember|save) this canonical: ...` trigger,
+   * the bridge enqueues the payload through `memoryCandidateQueue` and
+   * short-circuits the turn with a deterministic acknowledgment instead of
+   * letting the runtime continue into the model/tool path.
+   */
+  canonicalRememberBridge: CanonicalRememberBridge;
 };
 
 /**
@@ -208,16 +221,23 @@ function defaultMemoryIngesterLog(msg: string): void {
 
 /**
  * Bridge candidate-queue breadcrumbs into the same dedicated ACP subsystem
- * logger. Prefixed `[memory-candidate-queue]` lines reach the file at INFO;
- * operational summaries stay on `debug`.
+ * logger. Prefixed `[memory-candidate-queue]` and `[canonical-remember-bridge]`
+ * lines reach the file at INFO; operational summaries stay on `debug`.
  */
 function defaultMemoryCandidateQueueLog(msg: string): void {
-  if (msg.startsWith("[memory-candidate-queue]")) {
+  if (
+    msg.startsWith("[memory-candidate-queue]") ||
+    msg.startsWith("[canonical-remember-bridge]")
+  ) {
     acpMemoryIngestLog.info(msg);
   } else {
     acpMemoryIngestLog.debug(msg);
   }
 }
+
+const defaultMemoryCandidateQueueAdapter = createMemoryCandidateQueueAdapter({
+  log: defaultMemoryCandidateQueueLog,
+});
 
 export const DEFAULT_DEPS: AcpSessionManagerDeps = {
   listAcpSessions: listAcpSessionEntries,
@@ -227,7 +247,9 @@ export const DEFAULT_DEPS: AcpSessionManagerDeps = {
   requireRuntimeBackend: requireAcpRuntimeBackend,
   memoryInjector: createMemoryContextInjector(),
   memoryIngester: createMemoryIngestAdapter({ log: defaultMemoryIngesterLog }),
-  memoryCandidateQueue: createMemoryCandidateQueueAdapter({
+  memoryCandidateQueue: defaultMemoryCandidateQueueAdapter,
+  canonicalRememberBridge: createCanonicalRememberBridge({
+    adapter: defaultMemoryCandidateQueueAdapter,
     log: defaultMemoryCandidateQueueLog,
   }),
 };

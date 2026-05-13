@@ -30,6 +30,7 @@ import { formatErrorMessage } from "../../../infra/errors.js";
 import { resolveHeartbeatSummaryForAgent } from "../../../infra/heartbeat-summary.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
+import { createCanonicalRememberBridge } from "../../../memory/canonical-remember-bridge.js";
 import { createMemoryCandidateQueueAdapter } from "../../../memory/memory-candidate-queue-adapter.js";
 import { createMemoryContextInjector } from "../../../memory/memory-context-injection.js";
 import { createMemoryIngestAdapter } from "../../../memory/memory-ingest-adapter.js";
@@ -796,6 +797,49 @@ function isMemoryDebugEnabled(env: NodeJS.ProcessEnv): boolean {
   return lower === "true" || lower === "1" || lower === "yes" || lower === "on";
 }
 
+/**
+ * Build a minimal `EmbeddedRunAttemptResult` shaped as a clean text-only
+ * reply for the governed canonical-remember diversion path. The visible
+ * acknowledgment travels via `assistantTexts[0]` so the existing reply
+ * pipeline delivers it unchanged; messaging-tool counters stay empty
+ * because no tool was invoked. `replayMetadata` reports no side effects
+ * and `itemLifecycle` reports a zero-item turn so retry/replay logic
+ * treats this as a clean skip rather than a failed model run.
+ */
+function buildCanonicalDivertedEmbeddedAttemptResult(params: {
+  sessionId: string;
+  sessionFile?: string;
+  acknowledgment: string;
+  agentHarnessId?: string;
+}): EmbeddedRunAttemptResult {
+  return {
+    aborted: false,
+    externalAbort: false,
+    timedOut: false,
+    idleTimedOut: false,
+    timedOutDuringCompaction: false,
+    timedOutDuringToolExecution: false,
+    promptError: null,
+    promptErrorSource: null,
+    sessionIdUsed: params.sessionId,
+    ...(params.sessionFile !== undefined ? { sessionFileUsed: params.sessionFile } : {}),
+    ...(params.agentHarnessId !== undefined ? { agentHarnessId: params.agentHarnessId } : {}),
+    finalPromptText: undefined,
+    messagesSnapshot: [],
+    assistantTexts: [params.acknowledgment],
+    toolMetas: [],
+    lastAssistant: undefined,
+    currentAttemptAssistant: undefined,
+    didSendViaMessagingTool: false,
+    messagingToolSentTexts: [],
+    messagingToolSentMediaUrls: [],
+    messagingToolSentTargets: [],
+    cloudCodeAssistFormatError: false,
+    replayMetadata: { hadPotentialSideEffects: false, replaySafe: true },
+    itemLifecycle: { startedCount: 0, completedCount: 0, activeCount: 0 },
+  };
+}
+
 export async function runEmbeddedAttempt(
   params: EmbeddedRunAttemptParams,
 ): Promise<EmbeddedRunAttemptResult> {
@@ -848,11 +892,6 @@ export async function runEmbeddedAttempt(
     }
   };
 
-  // Best-effort semantic-memory ingest. The adapter no-ops unless memory is
-  // enabled and the raw user prompt starts with a "remember/save this"
-  // trigger. The hybrid grace+detach contract bounds the awaited delay to
-  // OPENCLAW_MEMORY_INGEST_GRACE_MS so it never blocks the run; pre-wrapped
-  // prompts are skipped to avoid double-ingest on retries.
   const memoryIngestDebug = isMemoryDebugEnabled(process.env);
   // Prefix router: keep all `[memory-ingest]` breadcrumbs at INFO so they
   // reach the gateway log file at the default file log level, while
@@ -866,6 +905,71 @@ export async function runEmbeddedAttempt(
       log.debug(msg);
     }
   };
+  const memoryCandidateQueueLogBridge = (msg: string): void => {
+    if (msg.startsWith("[memory-candidate-queue]")) {
+      log.info(msg);
+    } else if (msg.startsWith("[canonical-remember-bridge]")) {
+      log.info(msg);
+    } else {
+      log.debug(msg);
+    }
+  };
+  const memoryCandidateQueue =
+    params.memoryCandidateQueue ??
+    createMemoryCandidateQueueAdapter({ log: memoryCandidateQueueLogBridge });
+  const candidateQueueSource =
+    params.messageProvider?.trim() || params.messageChannel?.trim() || "runtime";
+  const candidateQueueMessageId =
+    params.currentMessageId !== undefined && params.currentMessageId !== null
+      ? String(params.currentMessageId)
+      : undefined;
+
+  // Governed canonical-remember diversion. Runs BEFORE semantic ingest,
+  // memory injection, model execution, and tool exposure so an explicit
+  // `(remember|save) this canonical: ...` message routes through the
+  // existing candidate queue adapter instead of reaching the normal
+  // tool-driven write path. Disabled when the candidate queue env flag is
+  // off; never matches generic `remember this` / `save this` traffic
+  // (semantic ingest still owns those) or the existing `queue memory:`
+  // trigger (the standard adapter call below still owns that).
+  const canonicalRememberBridge =
+    params.canonicalRememberBridge ??
+    createCanonicalRememberBridge({
+      adapter: memoryCandidateQueue,
+      log: memoryCandidateQueueLogBridge,
+    });
+  if (memoryIngestDebug) {
+    log.info("[canonical-remember-bridge] seam=embedded-attempt divert-start");
+  }
+  const canonicalDivertResult = await canonicalRememberBridge.divert(params.prompt, {
+    source: candidateQueueSource,
+    sessionKey: params.sessionKey ?? params.sessionId,
+    requestId: params.runId,
+    provider: params.messageProvider,
+    ...(candidateQueueMessageId !== undefined ? { messageId: candidateQueueMessageId } : {}),
+  });
+  if (memoryIngestDebug) {
+    log.info(
+      `[canonical-remember-bridge] seam=embedded-attempt divert-result diverted=${canonicalDivertResult.diverted}`,
+    );
+  }
+  if (canonicalDivertResult.diverted) {
+    log.info(
+      "[canonical-remember-bridge] seam=embedded-attempt short-circuit reason=canonical-diverted",
+    );
+    return buildCanonicalDivertedEmbeddedAttemptResult({
+      sessionId: params.sessionId,
+      sessionFile: params.sessionFile,
+      acknowledgment: canonicalDivertResult.acknowledgment,
+      agentHarnessId: params.agentHarnessId,
+    });
+  }
+
+  // Best-effort semantic-memory ingest. The adapter no-ops unless memory is
+  // enabled and the raw user prompt starts with a "remember/save this"
+  // trigger. The hybrid grace+detach contract bounds the awaited delay to
+  // OPENCLAW_MEMORY_INGEST_GRACE_MS so it never blocks the run; pre-wrapped
+  // prompts are skipped to avoid double-ingest on retries.
   const memoryIngester =
     params.memoryIngester ?? createMemoryIngestAdapter({ log: memoryIngestLogBridge });
   if (memoryIngestDebug) {
@@ -882,25 +986,9 @@ export async function runEmbeddedAttempt(
   // adapter above, but reacts only to the explicit `queue memory:` trigger
   // and forwards to the channel-agnostic candidate queue CLI. Fails open and
   // is fully decoupled from the existing semantic write path.
-  const memoryCandidateQueueLogBridge = (msg: string): void => {
-    if (msg.startsWith("[memory-candidate-queue]")) {
-      log.info(msg);
-    } else {
-      log.debug(msg);
-    }
-  };
-  const memoryCandidateQueue =
-    params.memoryCandidateQueue ??
-    createMemoryCandidateQueueAdapter({ log: memoryCandidateQueueLogBridge });
   if (memoryIngestDebug) {
     log.info("[memory-candidate-queue] seam=embedded-attempt enqueue-start");
   }
-  const candidateQueueSource =
-    params.messageProvider?.trim() || params.messageChannel?.trim() || "runtime";
-  const candidateQueueMessageId =
-    params.currentMessageId !== undefined && params.currentMessageId !== null
-      ? String(params.currentMessageId)
-      : undefined;
   const candidateQueueResult = await memoryCandidateQueue.enqueue(params.prompt, {
     source: candidateQueueSource,
     sessionKey: params.sessionKey ?? params.sessionId,

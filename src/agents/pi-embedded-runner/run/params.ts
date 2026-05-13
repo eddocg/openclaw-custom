@@ -9,6 +9,7 @@ import type { ReplyOperation } from "../../../auto-reply/reply/reply-run-registr
 import type { ReasoningLevel, ThinkLevel, VerboseLevel } from "../../../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import type { PromptImageOrderEntry } from "../../../media/prompt-image-order.js";
+import type { CanonicalRememberBridge } from "../../../memory/canonical-remember-bridge.js";
 import type { MemoryCandidateQueueAdapter } from "../../../memory/memory-candidate-queue-adapter.js";
 import type { MemoryContextInjector } from "../../../memory/memory-context-injection.js";
 import type { MemoryIngestAdapter } from "../../../memory/memory-ingest-adapter.js";
@@ -243,4 +244,14 @@ export type RunEmbeddedPiAgentParams = {
    * a fake.
    */
   memoryCandidateQueue?: MemoryCandidateQueueAdapter;
+  /**
+   * Optional canonical-remember bridge. When the candidate queue is enabled
+   * and the raw user prompt matches the explicit canonical-remember trigger
+   * (`(remember|save) this canonical: ...`), the bridge enqueues the payload
+   * into the governed candidate queue and short-circuits the turn before
+   * semantic ingest, memory injection, model execution, and tool exposure.
+   * Defaults to a fail-open bridge built around `memoryCandidateQueue`.
+   * Tests inject a fake.
+   */
+  canonicalRememberBridge?: CanonicalRememberBridge;
 };
