@@ -188,10 +188,11 @@ export function createCanonicalRememberBridge(
         return { diverted: false, reason: "empty-content" };
       }
       // Reuse the existing candidate queue adapter unchanged by synthesizing
-      // its native `queue memory:` envelope. The adapter handles spawn,
-      // grace, timeout, and CLI argument plumbing; the bridge is a thin
-      // detector + envelope wrapper so the canonical surface stays narrow.
-      const synthesized = `queue memory: ${content}`;
+      // its native `queue memory:` envelope while preserving canonical-rule
+      // framing for memory-core's router after the adapter strips that
+      // envelope. The bridge remains a thin detector + envelope wrapper so
+      // the matching surface stays narrow.
+      const synthesized = `queue memory: Remember this canonical operational rule: ${content}`;
       log(
         `[canonical-remember-bridge] divert trigger="${match.trigger}" triggerIndex=${match.index} contentChars=${content.length}`,
       );

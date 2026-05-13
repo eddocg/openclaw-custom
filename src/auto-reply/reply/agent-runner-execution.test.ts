@@ -547,7 +547,7 @@ describe("runAgentTurnWithFallback", () => {
 
     expect(state.memoryCandidateQueueEnqueueMock).toHaveBeenCalledTimes(1);
     expect(state.memoryCandidateQueueEnqueueMock).toHaveBeenCalledWith(
-      "queue memory: never auto-merge governed proposal bridge validations",
+      "queue memory: Remember this canonical operational rule: never auto-merge governed proposal bridge validations",
       {
         source: "discord",
         sessionKey: "main",

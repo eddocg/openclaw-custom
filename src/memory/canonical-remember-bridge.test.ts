@@ -133,7 +133,7 @@ describe("createCanonicalRememberBridge", () => {
     expect(adapter.enqueue).not.toHaveBeenCalled();
   });
 
-  it("calls adapter.enqueue exactly once with synthesized `queue memory:` envelope", async () => {
+  it("calls adapter.enqueue exactly once with canonical/durable framed content", async () => {
     const adapter = makeQueueAdapter();
     const bridge = createCanonicalRememberBridge({ adapter, env: ENABLED_ENV });
     const result = await bridge.divert(
@@ -143,8 +143,9 @@ describe("createCanonicalRememberBridge", () => {
     expect(adapter.enqueue).toHaveBeenCalledTimes(1);
     const args = (adapter.enqueue as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(args?.[0]).toBe(
-      "queue memory: governed proposal bridge requires review",
+      "queue memory: Remember this canonical operational rule: governed proposal bridge requires review",
     );
+    expect(args?.[0]).toContain("Remember this canonical operational rule:");
     expect(args?.[1]).toEqual({
       source: "discord",
       sessionKey: "agent:main:explicit:abc",
