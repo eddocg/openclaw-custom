@@ -119,8 +119,9 @@ describe("runEmbeddedAttempt memory-ingest wiring", () => {
   it("keeps skipped:disabled and skipped:no_trigger on the existing model path", async () => {
     const source = await readFile(SOURCE_FILE, "utf8");
 
+    expect(source).toContain("isSemanticMemoryIngestHandled");
     expect(source).toMatch(
-      /function\s+isSemanticMemoryIngestHandled\([^)]*status:[^)]*\)[\s\S]*?return\s+status\s*!==\s*"skipped:disabled"\s*&&\s*status\s*!==\s*"skipped:no_trigger";/,
+      /import\s*\{[\s\S]*isSemanticMemoryIngestHandled[\s\S]*\}\s*from\s*"../../../memory/memory-ingest-adapter\.js";/,
     );
   });
 

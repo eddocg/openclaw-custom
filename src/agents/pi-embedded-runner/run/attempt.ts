@@ -35,7 +35,9 @@ import { createMemoryCandidateQueueAdapter } from "../../../memory/memory-candid
 import { createMemoryContextInjector } from "../../../memory/memory-context-injection.js";
 import {
   createMemoryIngestAdapter,
-  type MemoryIngestResult,
+  isSemanticMemoryIngestHandled,
+  resolveSemanticMemoryIngestAcknowledgment,
+  SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON,
 } from "../../../memory/memory-ingest-adapter.js";
 import { listRegisteredPluginAgentPromptGuidance } from "../../../plugins/command-registry-state.js";
 import { getCurrentPluginMetadataSnapshot } from "../../../plugins/current-plugin-metadata-snapshot.js";
@@ -798,31 +800,6 @@ function isMemoryDebugEnabled(env: NodeJS.ProcessEnv): boolean {
   }
   const lower = raw.trim().toLowerCase();
   return lower === "true" || lower === "1" || lower === "yes" || lower === "on";
-}
-
-const SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON = "semantic_memory_ingest_handled";
-
-function isSemanticMemoryIngestHandled(status: MemoryIngestResult["status"]): boolean {
-  return status !== "skipped:disabled" && status !== "skipped:no_trigger";
-}
-
-function resolveSemanticMemoryIngestAcknowledgment(status: MemoryIngestResult["status"]): string {
-  switch (status) {
-    case "succeeded":
-      return "Semantic memory stored.";
-    case "detached":
-      return "Semantic memory queued for storage.";
-    case "timeout":
-      return "Semantic memory storage timed out; the write may complete in the background.";
-    case "failed":
-      return "Semantic memory storage failed.";
-    case "skipped:empty":
-      return "Nothing to store as semantic memory.";
-    case "skipped:wrapped":
-      return "Semantic memory ingest skipped because the prompt was already wrapped.";
-    default:
-      return "Semantic memory request handled.";
-  }
 }
 
 /**

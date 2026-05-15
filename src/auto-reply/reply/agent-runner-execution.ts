@@ -45,6 +45,12 @@ import { formatErrorMessage } from "../../infra/errors.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { createCanonicalRememberBridge } from "../../memory/canonical-remember-bridge.js";
 import { createMemoryCandidateQueueAdapter } from "../../memory/memory-candidate-queue-adapter.js";
+import {
+  createMemoryIngestAdapter,
+  isSemanticMemoryIngestHandled,
+  resolveSemanticMemoryIngestAcknowledgment,
+  SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON,
+} from "../../memory/memory-ingest-adapter.js";
 import { CommandLaneClearedError, GatewayDrainingError } from "../../process/command-queue.js";
 import { CommandLane } from "../../process/lanes.js";
 import { defaultRuntime } from "../../runtime.js";
@@ -1183,6 +1189,60 @@ export async function runAgentTurnWithFallback(params: {
           completion: {
             finishReason: "stop",
             stopReason: "canonical_remember_diverted",
+            refusal: false,
+          },
+          agentMeta: {
+            sessionId: params.followupRun.run.sessionId,
+            provider: params.followupRun.run.provider,
+            model: params.followupRun.run.model,
+          },
+        },
+      },
+      fallbackAttempts: [],
+      didLogHeartbeatStrip,
+      autoCompactionCount,
+      directlySentBlockKeys,
+    };
+  }
+  // Best-effort semantic-memory ingest. Runs after canonical divert so explicit
+  // durable semantic-memory triggers do not reach the model or native tools.
+  const memoryIngester = createMemoryIngestAdapter({
+    log: (message) => {
+      if (message.startsWith("[memory-ingest]")) {
+        autoReplyAgentRunnerLog.info(message);
+      } else {
+        autoReplyAgentRunnerLog.debug(message);
+      }
+    },
+  });
+  autoReplyAgentRunnerLog.info("[memory-ingest] seam=auto-reply-agent-runner ingest-start");
+  const memoryIngestResult = await memoryIngester.ingest(params.commandBody);
+  autoReplyAgentRunnerLog.info(
+    `[memory-ingest] seam=auto-reply-agent-runner ingest-result status=${memoryIngestResult.status} reason=${memoryIngestResult.reason ?? "none"}`,
+  );
+  if (isSemanticMemoryIngestHandled(memoryIngestResult.status)) {
+    autoReplyAgentRunnerLog.info(
+      `[memory-ingest] seam=auto-reply-agent-runner short-circuit reason=semantic-trigger-matched status=${memoryIngestResult.status}`,
+    );
+    const acknowledgment = resolveSemanticMemoryIngestAcknowledgment(memoryIngestResult.status);
+    return {
+      kind: "success",
+      runId,
+      runResult: {
+        payloads: [{ text: acknowledgment }],
+        meta: {
+          durationMs: 0,
+          finalAssistantVisibleText: acknowledgment,
+          finalAssistantRawText: acknowledgment,
+          executionTrace: {
+            winnerProvider: params.followupRun.run.provider,
+            winnerModel: params.followupRun.run.model,
+            attempts: [],
+            fallbackUsed: false,
+          },
+          completion: {
+            finishReason: "stop",
+            stopReason: SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON,
             refusal: false,
           },
           agentMeta: {

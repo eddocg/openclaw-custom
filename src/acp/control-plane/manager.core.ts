@@ -2,7 +2,11 @@ import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
 import { formatErrorMessage } from "../../infra/errors.js";
-import type { MemoryIngestResult } from "../../memory/memory-ingest-adapter.js";
+import {
+  isSemanticMemoryIngestHandled,
+  resolveSemanticMemoryIngestAcknowledgment,
+  SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON,
+} from "../../memory/memory-ingest-adapter.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
 import { isAcpSessionKey } from "../../sessions/session-key-utils.js";
 import { normalizeLowercaseStringOrEmpty } from "../../shared/string-coerce.js";
@@ -92,8 +96,6 @@ const ACP_TURN_TIMEOUT_CLEANUP_GRACE_MS = 2_000;
 const ACP_TURN_TIMEOUT_REASON = "turn-timeout";
 const ACP_BACKGROUND_TASK_TEXT_MAX_LENGTH = 160;
 const ACP_BACKGROUND_TASK_PROGRESS_MAX_LENGTH = 240;
-const SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON = "semantic_memory_ingest_handled";
-
 function summarizeBackgroundTaskText(text: string): string {
   const normalized = normalizeText(text) ?? "ACP background task";
   if (normalized.length <= ACP_BACKGROUND_TASK_TEXT_MAX_LENGTH) {
@@ -169,29 +171,6 @@ function isAcpMemoryDebugEnabled(env: NodeJS.ProcessEnv): boolean {
   }
   const lower = raw.trim().toLowerCase();
   return lower === "true" || lower === "1" || lower === "yes" || lower === "on";
-}
-
-function isSemanticMemoryIngestHandled(status: MemoryIngestResult["status"]): boolean {
-  return status !== "skipped:disabled" && status !== "skipped:no_trigger";
-}
-
-function resolveSemanticMemoryIngestAcknowledgment(status: MemoryIngestResult["status"]): string {
-  switch (status) {
-    case "succeeded":
-      return "Semantic memory stored.";
-    case "detached":
-      return "Semantic memory queued for storage.";
-    case "timeout":
-      return "Semantic memory storage timed out; the write may complete in the background.";
-    case "failed":
-      return "Semantic memory storage failed.";
-    case "skipped:empty":
-      return "Nothing to store as semantic memory.";
-    case "skipped:wrapped":
-      return "Semantic memory ingest skipped because the prompt was already wrapped.";
-    default:
-      return "Semantic memory request handled.";
-  }
 }
 
 export class AcpSessionManager {
