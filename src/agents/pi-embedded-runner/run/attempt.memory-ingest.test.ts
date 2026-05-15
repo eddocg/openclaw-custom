@@ -21,8 +21,8 @@ describe("runEmbeddedAttempt memory-ingest wiring", () => {
   it("imports the ingest adapter factory from the shared memory module", async () => {
     const source = await readFile(SOURCE_FILE, "utf8");
 
-    expect(source).toContain(
-      'import { createMemoryIngestAdapter } from "../../../memory/memory-ingest-adapter.js";',
+    expect(source).toMatch(
+      /import\s*\{[\s\S]*createMemoryIngestAdapter[\s\S]*\}\s*from\s*"../../../memory/memory-ingest-adapter\.js";/,
     );
   });
 
@@ -44,9 +44,19 @@ describe("runEmbeddedAttempt memory-ingest wiring", () => {
     const ingestIdx = source.search(
       /const\s+memoryIngestResult\s*=\s*await\s+memoryIngester\.ingest\(\s*params\.prompt\s*\)/,
     );
+    const shortCircuitIdx = source.indexOf(
+      "isSemanticMemoryIngestHandled(memoryIngestResult.status)",
+    );
+    const enqueueIdx = source.search(
+      /const\s+candidateQueueResult\s*=\s*await\s+memoryCandidateQueue\.enqueue\(\s*params\.prompt\b/,
+    );
     const injectIdx = source.indexOf("const submittedPrompt = await memoryInjector.inject({");
     expect(ingestIdx).toBeGreaterThan(-1);
+    expect(shortCircuitIdx).toBeGreaterThan(-1);
+    expect(enqueueIdx).toBeGreaterThan(-1);
     expect(injectIdx).toBeGreaterThan(-1);
+    expect(ingestIdx).toBeLessThan(shortCircuitIdx);
+    expect(shortCircuitIdx).toBeLessThan(enqueueIdx);
     expect(ingestIdx).toBeLessThan(injectIdx);
   });
 
@@ -74,6 +84,44 @@ describe("runEmbeddedAttempt memory-ingest wiring", () => {
     const startIdx = source.indexOf("[memory-ingest] seam=embedded-attempt ingest-start");
     const before = source.slice(Math.max(0, startIdx - 200), startIdx);
     expect(before).toContain("memoryIngestDebug");
+  });
+
+  it("short-circuits handled semantic trigger statuses before queue, injection, and model execution", async () => {
+    const source = await readFile(SOURCE_FILE, "utf8");
+
+    expect(source).toMatch(
+      /if\s*\(\s*isSemanticMemoryIngestHandled\(memoryIngestResult\.status\)\s*\)\s*\{[\s\S]*?short-circuit reason=semantic-trigger-matched status=\$\{memoryIngestResult\.status\}[\s\S]*?return\s+await\s+buildSemanticMemoryHandledEmbeddedAttemptResult\(/,
+    );
+    expect(source).toContain(
+      "[memory-ingest] seam=embedded-attempt short-circuit reason=semantic-trigger-matched status=",
+    );
+    expect(source).toContain("stopReason: SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON");
+    expect(source).toMatch(/type:\s*"text_delta"[\s\S]*?text:\s*params\.acknowledgment/);
+    expect(source).toMatch(/type:\s*"done"[\s\S]*?stopReason:/);
+
+    const shortCircuitIdx = source.indexOf(
+      "isSemanticMemoryIngestHandled(memoryIngestResult.status)",
+    );
+    const enqueueIdx = source.search(
+      /const\s+candidateQueueResult\s*=\s*await\s+memoryCandidateQueue\.enqueue\(\s*params\.prompt\b/,
+    );
+    const injectIdx = source.indexOf("const submittedPrompt = await memoryInjector.inject({");
+    const modelIdx = source.indexOf("activeSession.prompt(");
+    expect(shortCircuitIdx).toBeGreaterThan(-1);
+    expect(enqueueIdx).toBeGreaterThan(-1);
+    expect(injectIdx).toBeGreaterThan(-1);
+    expect(modelIdx).toBeGreaterThan(-1);
+    expect(shortCircuitIdx).toBeLessThan(enqueueIdx);
+    expect(shortCircuitIdx).toBeLessThan(injectIdx);
+    expect(shortCircuitIdx).toBeLessThan(modelIdx);
+  });
+
+  it("keeps skipped:disabled and skipped:no_trigger on the existing model path", async () => {
+    const source = await readFile(SOURCE_FILE, "utf8");
+
+    expect(source).toMatch(
+      /function\s+isSemanticMemoryIngestHandled\([^)]*status:[^)]*\)[\s\S]*?return\s+status\s*!==\s*"skipped:disabled"\s*&&\s*status\s*!==\s*"skipped:no_trigger";/,
+    );
   });
 
   it("wires a prefix-routing log bridge into the default-constructed adapter", async () => {
