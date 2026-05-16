@@ -2,6 +2,11 @@ import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
 import { formatErrorMessage } from "../../infra/errors.js";
+import {
+  isSemanticMemoryIngestHandled,
+  resolveSemanticMemoryIngestAcknowledgment,
+  SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON,
+} from "../../memory/memory-ingest-adapter.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
 import { isAcpSessionKey } from "../../sessions/session-key-utils.js";
 import { normalizeLowercaseStringOrEmpty } from "../../shared/string-coerce.js";
@@ -91,7 +96,6 @@ const ACP_TURN_TIMEOUT_CLEANUP_GRACE_MS = 2_000;
 const ACP_TURN_TIMEOUT_REASON = "turn-timeout";
 const ACP_BACKGROUND_TASK_TEXT_MAX_LENGTH = 160;
 const ACP_BACKGROUND_TASK_PROGRESS_MAX_LENGTH = 240;
-
 function summarizeBackgroundTaskText(text: string): string {
   const normalized = normalizeText(text) ?? "ACP background task";
   if (normalized.length <= ACP_BACKGROUND_TASK_TEXT_MAX_LENGTH) {
@@ -825,6 +829,44 @@ export class AcpSessionManager {
           acpMemoryIngestLog.info(
             `[memory-ingest] seam=acp-manager ingest-result status=${memoryIngestResult.status} reason=${memoryIngestResult.reason ?? "none"}`,
           );
+        }
+        if (isSemanticMemoryIngestHandled(memoryIngestResult.status)) {
+          const acknowledgment = resolveSemanticMemoryIngestAcknowledgment(
+            memoryIngestResult.status,
+          );
+          acpMemoryIngestLog.info(
+            `[memory-ingest] seam=acp-manager short-circuit reason=semantic-trigger-matched status=${memoryIngestResult.status}`,
+          );
+          if (input.onEvent) {
+            await input.onEvent({
+              type: "text_delta",
+              text: acknowledgment,
+              stream: "output",
+            });
+            await input.onEvent({
+              type: "done",
+              stopReason: SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON,
+            });
+          }
+          if (taskContext) {
+            this.markBackgroundTaskTerminal(taskContext.runId, {
+              sessionKey,
+              status: "succeeded",
+              endedAt: Date.now(),
+              lastEventAt: Date.now(),
+              error: undefined,
+              progressSummary: acknowledgment,
+              terminalSummary: acknowledgment,
+              terminalOutcome: "succeeded",
+            });
+          }
+          await this.setSessionState({
+            cfg: input.cfg,
+            sessionKey,
+            state: "idle",
+            clearLastError: true,
+          });
+          return;
         }
         // Best-effort candidate-queue enqueue. Parallel to the semantic
         // ingest call above; reacts only to the explicit `queue memory:`

@@ -25,6 +25,7 @@ const state = vi.hoisted(() => ({
   isInternalMessageChannelMock: vi.fn((_: unknown) => false),
   createBlockReplyDeliveryHandlerMock: vi.fn(),
   memoryCandidateQueueEnqueueMock: vi.fn(),
+  memoryIngestMock: vi.fn(),
 }));
 
 const GENERIC_RUN_FAILURE_TEXT =
@@ -122,20 +123,60 @@ vi.mock("../../infra/agent-events.js", async () => {
   };
 });
 
-vi.mock("../../logging/subsystem.js", () => ({
-  createSubsystemLogger: () => ({
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-  }),
-}));
+vi.mock("../../logging/subsystem.js", () => {
+  const createMockLogger = () => {
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      child: vi.fn(),
+    };
+    logger.child.mockReturnValue(logger);
+    return logger;
+  };
+  return {
+    createSubsystemLogger: () => createMockLogger(),
+  };
+});
 
 vi.mock("../../memory/memory-candidate-queue-adapter.js", () => ({
   createMemoryCandidateQueueAdapter: () => ({
     enqueue: state.memoryCandidateQueueEnqueueMock,
   }),
 }));
+
+vi.mock(import("../../memory/memory-ingest-adapter.js"), async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    containsForbiddenSubstring: actual.containsForbiddenSubstring,
+    createMemoryIngestAdapter: () => ({
+      ingest: state.memoryIngestMock,
+    }),
+    isSemanticMemoryIngestHandled: (status: string) =>
+      status !== "skipped:disabled" && status !== "skipped:no_trigger",
+    resolveSemanticMemoryIngestAcknowledgment: (status: string) => {
+      switch (status) {
+        case "succeeded":
+          return "Semantic memory stored.";
+        case "detached":
+          return "Semantic memory queued for storage.";
+        case "timeout":
+          return "Semantic memory storage timed out; the write may complete in the background.";
+        case "failed":
+          return "Semantic memory storage failed.";
+        case "skipped:empty":
+          return "Nothing to store as semantic memory.";
+        case "skipped:wrapped":
+          return "Semantic memory ingest skipped because the prompt was already wrapped.";
+        default:
+          return "Semantic memory request handled.";
+      }
+    },
+    SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON: "semantic_memory_ingest_handled",
+  };
+});
 
 vi.mock("../../runtime.js", () => ({
   defaultRuntime: {
@@ -504,6 +545,8 @@ describe("runAgentTurnWithFallback", () => {
     state.memoryCandidateQueueEnqueueMock.mockResolvedValue({
       status: "skipped:no_trigger",
     });
+    state.memoryIngestMock.mockReset();
+    state.memoryIngestMock.mockResolvedValue({ status: "skipped:no_trigger" });
     delete process.env.OPENCLAW_MEMORY_CANDIDATE_QUEUE_ENABLED;
     state.runWithModelFallbackMock.mockImplementation(async (params: FallbackRunnerParams) => ({
       result: await params.run("anthropic", "claude"),
@@ -565,7 +608,119 @@ describe("runAgentTurnWithFallback", () => {
       expect(result.runResult.meta?.finalAssistantVisibleText).toBe(
         CANONICAL_REMEMBER_ACKNOWLEDGMENT,
       );
+      expect(result.runResult.meta?.completion?.stopReason).toBe("canonical_remember_diverted");
     }
+    expect(state.memoryIngestMock).not.toHaveBeenCalled();
+  });
+
+  it("short-circuits semantic memory ingest before the model runtime when succeeded", async () => {
+    state.memoryIngestMock.mockResolvedValueOnce({ status: "succeeded" });
+    state.runEmbeddedPiAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "model should not run" }],
+      meta: {},
+    });
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    const followupRun = createFollowupRun();
+    followupRun.run.messageProvider = "discord";
+
+    const result = await runAgentTurnWithFallback(
+      createMinimalRunAgentTurnParams({
+        commandBody: "remember this as semantic memory: OBSIDIAN FALCON 771",
+        followupRun,
+        sessionCtx: {
+          Provider: "discord",
+          MessageSid: "discord-message-semantic-1",
+        } as unknown as TemplateContext,
+        opts: { runId: "run-semantic-1" },
+      }) satisfies Parameters<typeof runAgentTurnWithFallback>[0],
+    );
+
+    expect(state.memoryIngestMock).toHaveBeenCalledTimes(1);
+    expect(state.memoryIngestMock).toHaveBeenCalledWith(
+      "remember this as semantic memory: OBSIDIAN FALCON 771",
+    );
+    expect(state.runWithModelFallbackMock).not.toHaveBeenCalled();
+    expect(state.runCliAgentMock).not.toHaveBeenCalled();
+    expect(state.runEmbeddedPiAgentMock).not.toHaveBeenCalled();
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      expect(result.runResult.payloads?.[0]?.text).toBe("Semantic memory stored.");
+      expect(result.runResult.meta?.finalAssistantVisibleText).toBe("Semantic memory stored.");
+      expect(result.runResult.meta?.completion?.stopReason).toBe(
+        "semantic_memory_ingest_handled",
+      );
+    }
+  });
+
+  it("short-circuits semantic memory ingest with a queued acknowledgment when detached", async () => {
+    state.memoryIngestMock.mockResolvedValueOnce({ status: "detached" });
+    state.runEmbeddedPiAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "model should not run" }],
+      meta: {},
+    });
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    const result = await runAgentTurnWithFallback(
+      createMinimalRunAgentTurnParams({
+        commandBody: "remember this: queue it",
+        opts: { runId: "run-semantic-detached" },
+      }) satisfies Parameters<typeof runAgentTurnWithFallback>[0],
+    );
+
+    expect(state.runWithModelFallbackMock).not.toHaveBeenCalled();
+    expect(state.runEmbeddedPiAgentMock).not.toHaveBeenCalled();
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      expect(result.runResult.payloads?.[0]?.text).toBe(
+        "Semantic memory queued for storage.",
+      );
+      expect(result.runResult.meta?.completion?.stopReason).toBe(
+        "semantic_memory_ingest_handled",
+      );
+    }
+  });
+
+  it("continues normally when semantic ingest reports no trigger", async () => {
+    state.memoryIngestMock.mockResolvedValueOnce({ status: "skipped:no_trigger" });
+    state.runEmbeddedPiAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "normal model reply" }],
+      meta: {},
+    });
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    const result = await runAgentTurnWithFallback(
+      createMinimalRunAgentTurnParams({
+        commandBody: "what is the weather today",
+        opts: { runId: "run-semantic-no-trigger" },
+      }) satisfies Parameters<typeof runAgentTurnWithFallback>[0],
+    );
+
+    expect(state.memoryIngestMock).toHaveBeenCalledTimes(1);
+    expect(state.runWithModelFallbackMock).toHaveBeenCalledTimes(1);
+    expect(state.runEmbeddedPiAgentMock).toHaveBeenCalledTimes(1);
+    expect(result.kind).toBe("success");
+  });
+
+  it("continues normally when semantic memory ingest is disabled", async () => {
+    state.memoryIngestMock.mockResolvedValueOnce({ status: "skipped:disabled" });
+    state.runEmbeddedPiAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "normal model reply" }],
+      meta: {},
+    });
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    const result = await runAgentTurnWithFallback(
+      createMinimalRunAgentTurnParams({
+        commandBody: "remember this as semantic memory: something",
+        opts: { runId: "run-semantic-disabled" },
+      }) satisfies Parameters<typeof runAgentTurnWithFallback>[0],
+    );
+
+    expect(state.memoryIngestMock).toHaveBeenCalledTimes(1);
+    expect(state.runWithModelFallbackMock).toHaveBeenCalledTimes(1);
+    expect(state.runEmbeddedPiAgentMock).toHaveBeenCalledTimes(1);
+    expect(result.kind).toBe("success");
   });
 
   it("preserves the CLI path when canonical diversion does not match", async () => {
@@ -643,6 +798,22 @@ describe("runAgentTurnWithFallback", () => {
     expect(divertedBlock ?? "").not.toMatch(/memory_flush/);
     expect(divertedBlock ?? "").not.toMatch(/writeFile|appendFile/);
     expect(divertedBlock ?? "").not.toMatch(/runCliAgent|runEmbeddedPiAgent/);
+  });
+
+  it("does not reach MEMORY.md tooling or model execution in the semantic handled block", async () => {
+    const source = await readFile(SOURCE_FILE, "utf8");
+    const semanticBlock = source.match(
+      /if\s*\(\s*isSemanticMemoryIngestHandled\(memoryIngestResult\.status\)\s*\)\s*\{[\s\S]*?return\s*\{[\s\S]*?directlySentBlockKeys,\s*\};\s*\}/,
+    )?.[0];
+
+    expect(semanticBlock).toBeDefined();
+    expect(semanticBlock ?? "").toContain(
+      "[memory-ingest] seam=auto-reply-agent-runner short-circuit reason=semantic-trigger-matched status=",
+    );
+    expect(semanticBlock ?? "").not.toMatch(/MEMORY\.md/);
+    expect(semanticBlock ?? "").not.toMatch(/memory_flush/);
+    expect(semanticBlock ?? "").not.toMatch(/writeFile|appendFile/);
+    expect(semanticBlock ?? "").not.toMatch(/runCliAgent|runEmbeddedPiAgent/);
   });
 
   it("forwards the static extra system prompt to CLI backends", async () => {

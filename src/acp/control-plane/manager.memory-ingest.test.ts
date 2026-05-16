@@ -2,13 +2,20 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import type { OpenClawConfig } from "../../config/config.js";
 import type { SessionAcpMeta } from "../../config/sessions/types.js";
 import type { MemoryContextAdapter } from "../../memory/memory-context-adapter.js";
-import { createMemoryContextInjector } from "../../memory/memory-context-injection.js";
+import {
+  createMemoryContextInjector,
+  type MemoryContextInjector,
+} from "../../memory/memory-context-injection.js";
 import {
   MemoryIngestError,
   type MemoryIngestAdapter,
   type MemoryIngestResult,
 } from "../../memory/memory-ingest-adapter.js";
-import type { AcpRuntime, AcpRuntimeCapabilities } from "../runtime/types.js";
+import type {
+  AcpRuntime,
+  AcpRuntimeCapabilities,
+  AcpRuntimeEvent,
+} from "../runtime/types.js";
 
 const hoisted = vi.hoisted(() => ({
   listAcpSessionEntriesMock: vi.fn(),
@@ -126,6 +133,12 @@ function makeStubInjector() {
   return createMemoryContextInjector({ adapter });
 }
 
+function makeSpyInjector(): MemoryContextInjector & { inject: ReturnType<typeof vi.fn> } {
+  return {
+    inject: vi.fn(async (input: { promptToWrap: string }) => input.promptToWrap),
+  } as MemoryContextInjector & { inject: ReturnType<typeof vi.fn> };
+}
+
 describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
   beforeAll(async () => {
     ({
@@ -184,7 +197,7 @@ describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
     expect(runTurn).toHaveBeenCalledTimes(1);
   });
 
-  it("ingests before invoking runtime.runTurn (call order)", async () => {
+  it("short-circuits succeeded semantic ingest before memory injection and runtime.runTurn", async () => {
     const { runtime, runTurn } = createRuntime();
     bindRuntime(runtime);
 
@@ -195,14 +208,15 @@ describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
         return { status: "succeeded", content: "ORANGE FALCON" };
       }),
     };
-    runTurn.mockImplementation(async function* () {
-      callOrder.push("runTurn");
-      yield { type: "done" as const };
+    const memoryInjector = makeSpyInjector();
+    const events: AcpRuntimeEvent[] = [];
+    const onEvent = vi.fn(async (event: AcpRuntimeEvent) => {
+      events.push(event);
     });
 
     const manager = new AcpSessionManager({
       ...DEFAULT_DEPS,
-      memoryInjector: makeStubInjector(),
+      memoryInjector,
       memoryIngester,
     });
 
@@ -212,31 +226,41 @@ describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
       text: "Remember this as semantic memory: ORANGE FALCON",
       mode: "prompt",
       requestId: "r-ing-2",
+      onEvent,
     });
 
-    expect(callOrder).toEqual(["ingest", "runTurn"]);
+    expect(callOrder).toEqual(["ingest"]);
+    expect(memoryInjector.inject).not.toHaveBeenCalled();
+    expect(runTurn).not.toHaveBeenCalled();
+    expect(events).toHaveLength(2);
+    const [textEvent, doneEvent] = events;
+    expect(textEvent.type).toBe("text_delta");
+    if (textEvent.type === "text_delta") {
+      expect(textEvent.text).toBe("Semantic memory stored.");
+      expect(textEvent.stream).toBe("output");
+    }
+    expect(doneEvent.type).toBe("done");
+    if (doneEvent.type === "done") {
+      expect(doneEvent.stopReason).toBe("semantic_memory_ingest_handled");
+    }
   });
 
-  it("does not alter prompt text forwarded to runtime.runTurn (write path is side-effect only)", async () => {
+  it("continues through memory injection and runtime.runTurn for skipped:no_trigger", async () => {
     const { runtime, runTurn } = createRuntime();
     bindRuntime(runtime);
 
     const memoryIngester: MemoryIngestAdapter = {
-      ingest: vi.fn(
-        async (): Promise<MemoryIngestResult> => ({
-          status: "succeeded",
-          content: "ORANGE FALCON",
-        }),
-      ),
+      ingest: vi.fn(async (): Promise<MemoryIngestResult> => ({ status: "skipped:no_trigger" })),
     };
+    const memoryInjector = makeSpyInjector();
 
     const manager = new AcpSessionManager({
       ...DEFAULT_DEPS,
-      memoryInjector: makeStubInjector(),
+      memoryInjector,
       memoryIngester,
     });
 
-    const userText = "Remember this as semantic memory: ORANGE FALCON";
+    const userText = "what is the bot ingestion phrase?";
     await manager.runTurn({
       cfg: baseCfg,
       sessionKey: SESSION_KEY,
@@ -245,6 +269,9 @@ describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
       requestId: "r-ing-3",
     });
 
+    expect(memoryIngester.ingest).toHaveBeenCalledTimes(1);
+    expect(memoryInjector.inject).toHaveBeenCalledTimes(1);
+    expect(runTurn).toHaveBeenCalledTimes(1);
     const forwarded = runTurn.mock.calls[0]?.[0] as { text: string } | undefined;
     expect(forwarded?.text).toBe(userText);
   });
@@ -313,7 +340,7 @@ describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
     expect(memoryIngester.ingest).toHaveBeenCalledWith(wrapped);
     const result = await (memoryIngester.ingest as ReturnType<typeof vi.fn>).mock.results[0]?.value;
     expect(result?.status).toBe("skipped:wrapped");
-    expect(runTurn).toHaveBeenCalledTimes(1);
+    expect(runTurn).not.toHaveBeenCalled();
   });
 
   it("emits seam-start and seam-result lines via acpMemoryIngestLog.info when OPENCLAW_MEMORY_DEBUG=true", async () => {
@@ -347,13 +374,21 @@ describe("AcpSessionManager.runTurn memory-ingest wiring", () => {
     });
 
     expect(memoryIngester.ingest).toHaveBeenCalledTimes(1);
-    expect(runTurn).toHaveBeenCalledTimes(1);
+    expect(runTurn).not.toHaveBeenCalled();
 
     const infoCalls = hoisted.acpMemoryIngestInfoMock.mock.calls.map(([msg]) => String(msg));
     expect(infoCalls.some((m) => /seam=acp-manager ingest-start/.test(m))).toBe(true);
     expect(infoCalls.some((m) => /seam=acp-manager ingest-result status=succeeded/.test(m))).toBe(
       true,
     );
+    expect(
+      infoCalls.some(
+        (m) =>
+          /seam=acp-manager short-circuit reason=semantic-trigger-matched status=succeeded/.test(
+            m,
+          ),
+      ),
+    ).toBe(true);
     // Reason marker must be present (either "ok" or "none"), but we do not
     // assert the full reason content to avoid overfitting.
     expect(infoCalls.some((m) => /reason=/.test(m))).toBe(true);

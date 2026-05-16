@@ -73,6 +73,36 @@ export type MemoryIngestResult = {
   content?: string;
 };
 
+export const SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON =
+  "semantic_memory_ingest_handled" as const;
+
+export function isSemanticMemoryIngestHandled(
+  status: MemoryIngestResult["status"],
+): boolean {
+  return status !== "skipped:disabled" && status !== "skipped:no_trigger";
+}
+
+export function resolveSemanticMemoryIngestAcknowledgment(
+  status: MemoryIngestResult["status"],
+): string {
+  switch (status) {
+    case "succeeded":
+      return "Semantic memory stored.";
+    case "detached":
+      return "Semantic memory queued for storage.";
+    case "timeout":
+      return "Semantic memory storage timed out; the write may complete in the background.";
+    case "failed":
+      return "Semantic memory storage failed.";
+    case "skipped:empty":
+      return "Nothing to store as semantic memory.";
+    case "skipped:wrapped":
+      return "Semantic memory ingest skipped because the prompt was already wrapped.";
+    default:
+      return "Semantic memory request handled.";
+  }
+}
+
 export type SpawnFn = (
   command: string,
   args: ReadonlyArray<string>,

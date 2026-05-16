@@ -33,7 +33,12 @@ import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
 import { createCanonicalRememberBridge } from "../../../memory/canonical-remember-bridge.js";
 import { createMemoryCandidateQueueAdapter } from "../../../memory/memory-candidate-queue-adapter.js";
 import { createMemoryContextInjector } from "../../../memory/memory-context-injection.js";
-import { createMemoryIngestAdapter } from "../../../memory/memory-ingest-adapter.js";
+import {
+  createMemoryIngestAdapter,
+  isSemanticMemoryIngestHandled,
+  resolveSemanticMemoryIngestAcknowledgment,
+  SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON,
+} from "../../../memory/memory-ingest-adapter.js";
 import { listRegisteredPluginAgentPromptGuidance } from "../../../plugins/command-registry-state.js";
 import { getCurrentPluginMetadataSnapshot } from "../../../plugins/current-plugin-metadata-snapshot.js";
 import { buildAgentHookContextChannelFields } from "../../../plugins/hook-agent-context.js";
@@ -840,6 +845,67 @@ function buildCanonicalDivertedEmbeddedAttemptResult(params: {
   };
 }
 
+/**
+ * Build a minimal `EmbeddedRunAttemptResult` for semantic-memory trigger
+ * handling. The synthetic assistant update mirrors the ACP short-circuit
+ * shape for stream observers, while `assistantTexts[0]` keeps the existing
+ * embedded reply pipeline deterministic.
+ */
+async function buildSemanticMemoryHandledEmbeddedAttemptResult(params: {
+  sessionId: string;
+  sessionKey?: string;
+  sessionFile?: string;
+  acknowledgment: string;
+  agentHarnessId?: string;
+  onAgentEvent?: EmbeddedRunAttemptParams["onAgentEvent"];
+}): Promise<EmbeddedRunAttemptResult> {
+  await params.onAgentEvent?.({
+    stream: "assistant",
+    data: {
+      type: "text_delta",
+      text: params.acknowledgment,
+      delta: params.acknowledgment,
+      stream: "output",
+    },
+    ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
+  });
+  await params.onAgentEvent?.({
+    stream: "lifecycle",
+    data: {
+      type: "done",
+      phase: "end",
+      stopReason: SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON,
+    },
+    ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
+  });
+  return {
+    aborted: false,
+    externalAbort: false,
+    timedOut: false,
+    idleTimedOut: false,
+    timedOutDuringCompaction: false,
+    timedOutDuringToolExecution: false,
+    promptError: null,
+    promptErrorSource: null,
+    sessionIdUsed: params.sessionId,
+    ...(params.sessionFile !== undefined ? { sessionFileUsed: params.sessionFile } : {}),
+    ...(params.agentHarnessId !== undefined ? { agentHarnessId: params.agentHarnessId } : {}),
+    finalPromptText: undefined,
+    messagesSnapshot: [],
+    assistantTexts: [params.acknowledgment],
+    toolMetas: [],
+    lastAssistant: undefined,
+    currentAttemptAssistant: undefined,
+    didSendViaMessagingTool: false,
+    messagingToolSentTexts: [],
+    messagingToolSentMediaUrls: [],
+    messagingToolSentTargets: [],
+    cloudCodeAssistFormatError: false,
+    replayMetadata: { hadPotentialSideEffects: false, replaySafe: true },
+    itemLifecycle: { startedCount: 0, completedCount: 0, activeCount: 0 },
+  };
+}
+
 export async function runEmbeddedAttempt(
   params: EmbeddedRunAttemptParams,
 ): Promise<EmbeddedRunAttemptResult> {
@@ -980,6 +1046,19 @@ export async function runEmbeddedAttempt(
     log.info(
       `[memory-ingest] seam=embedded-attempt ingest-result status=${memoryIngestResult.status} reason=${memoryIngestResult.reason ?? "none"}`,
     );
+  }
+  if (isSemanticMemoryIngestHandled(memoryIngestResult.status)) {
+    log.info(
+      `[memory-ingest] seam=embedded-attempt short-circuit reason=semantic-trigger-matched status=${memoryIngestResult.status}`,
+    );
+    return await buildSemanticMemoryHandledEmbeddedAttemptResult({
+      sessionId: params.sessionId,
+      sessionKey: params.sessionKey,
+      sessionFile: params.sessionFile,
+      acknowledgment: resolveSemanticMemoryIngestAcknowledgment(memoryIngestResult.status),
+      agentHarnessId: params.agentHarnessId,
+      onAgentEvent: params.onAgentEvent,
+    });
   }
 
   // Best-effort candidate-queue enqueue. Parallel to the semantic ingest
