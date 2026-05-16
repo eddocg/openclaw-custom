@@ -123,14 +123,22 @@ vi.mock("../../infra/agent-events.js", async () => {
   };
 });
 
-vi.mock("../../logging/subsystem.js", () => ({
-  createSubsystemLogger: () => ({
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-  }),
-}));
+vi.mock("../../logging/subsystem.js", () => {
+  const createMockLogger = () => {
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      child: vi.fn(),
+    };
+    logger.child.mockReturnValue(logger);
+    return logger;
+  };
+  return {
+    createSubsystemLogger: () => createMockLogger(),
+  };
+});
 
 vi.mock("../../memory/memory-candidate-queue-adapter.js", () => ({
   createMemoryCandidateQueueAdapter: () => ({
