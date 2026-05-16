@@ -26,6 +26,7 @@ const state = vi.hoisted(() => ({
   createBlockReplyDeliveryHandlerMock: vi.fn(),
   memoryCandidateQueueEnqueueMock: vi.fn(),
   memoryIngestMock: vi.fn(),
+  discordTurnEpisodeRecordMock: vi.fn(),
 }));
 
 const GENERIC_RUN_FAILURE_TEXT =
@@ -143,6 +144,12 @@ vi.mock("../../logging/subsystem.js", () => {
 vi.mock("../../memory/memory-candidate-queue-adapter.js", () => ({
   createMemoryCandidateQueueAdapter: () => ({
     enqueue: state.memoryCandidateQueueEnqueueMock,
+  }),
+}));
+
+vi.mock("../../memory/discord-turn-episode-adapter.js", () => ({
+  createDiscordTurnEpisodeAdapter: () => ({
+    record: state.discordTurnEpisodeRecordMock,
   }),
 }));
 
@@ -547,6 +554,7 @@ describe("runAgentTurnWithFallback", () => {
     });
     state.memoryIngestMock.mockReset();
     state.memoryIngestMock.mockResolvedValue({ status: "skipped:no_trigger" });
+    state.discordTurnEpisodeRecordMock.mockReset();
     delete process.env.OPENCLAW_MEMORY_CANDIDATE_QUEUE_ENABLED;
     state.runWithModelFallbackMock.mockImplementation(async (params: FallbackRunnerParams) => ({
       result: await params.run("anthropic", "claude"),
@@ -610,6 +618,18 @@ describe("runAgentTurnWithFallback", () => {
       );
       expect(result.runResult.meta?.completion?.stopReason).toBe("canonical_remember_diverted");
     }
+    expectMockCallArgFields(state.discordTurnEpisodeRecordMock, 0, "discord turn record", {
+      sessionKey: "main",
+      runId: "run-canonical-1",
+      userMessage: "remember this canonical: never auto-merge governed proposal bridge validations",
+      provider: "codex-cli",
+      model: "gpt-5.5",
+      stopReason: "canonical_remember_diverted",
+      outcome: "short_circuit",
+      assistantText: CANONICAL_REMEMBER_ACKNOWLEDGMENT,
+      messageId: "discord-message-1",
+      durationMs: expect.any(Number),
+    });
     expect(state.memoryIngestMock).not.toHaveBeenCalled();
   });
 
@@ -651,6 +671,18 @@ describe("runAgentTurnWithFallback", () => {
         "semantic_memory_ingest_handled",
       );
     }
+    expectMockCallArgFields(state.discordTurnEpisodeRecordMock, 0, "discord turn record", {
+      sessionKey: "main",
+      runId: "run-semantic-1",
+      userMessage: "remember this as semantic memory: OBSIDIAN FALCON 771",
+      provider: "anthropic",
+      model: "claude",
+      stopReason: "semantic_memory_ingest_handled",
+      outcome: "short_circuit",
+      assistantText: "Semantic memory stored.",
+      messageId: "discord-message-semantic-1",
+      durationMs: expect.any(Number),
+    });
   });
 
   it("short-circuits semantic memory ingest with a queued acknowledgment when detached", async () => {
@@ -700,6 +732,79 @@ describe("runAgentTurnWithFallback", () => {
     expect(state.runWithModelFallbackMock).toHaveBeenCalledTimes(1);
     expect(state.runEmbeddedPiAgentMock).toHaveBeenCalledTimes(1);
     expect(result.kind).toBe("success");
+  });
+
+  it("records successful model turns without changing normal reply behavior", async () => {
+    state.memoryIngestMock.mockResolvedValueOnce({ status: "skipped:no_trigger" });
+    state.runEmbeddedPiAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "normal model reply" }],
+      meta: {
+        finalAssistantVisibleText: "normal model reply",
+        completion: { stopReason: "stop" },
+      },
+    });
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    const followupRun = createFollowupRun();
+    followupRun.run.messageProvider = "discord";
+    const result = await runAgentTurnWithFallback(
+      createMinimalRunAgentTurnParams({
+        commandBody: "what is the weather today",
+        followupRun,
+        sessionCtx: {
+          Provider: "discord",
+          MessageSid: "discord-message-short",
+          MessageSidFull: "discord-message-full",
+        } as unknown as TemplateContext,
+        opts: { runId: "run-success-1" },
+      }) satisfies Parameters<typeof runAgentTurnWithFallback>[0],
+    );
+
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      expect(result.runResult.payloads?.[0]?.text).toBe("normal model reply");
+    }
+    expect(state.runWithModelFallbackMock).toHaveBeenCalledTimes(1);
+    expect(state.runEmbeddedPiAgentMock).toHaveBeenCalledTimes(1);
+    expectMockCallArgFields(state.discordTurnEpisodeRecordMock, 0, "discord turn record", {
+      sessionKey: "main",
+      runId: "run-success-1",
+      userMessage: "what is the weather today",
+      provider: "anthropic",
+      model: "claude",
+      stopReason: "stop",
+      outcome: "success",
+      assistantText: "normal model reply",
+      messageId: "discord-message-full",
+      durationMs: expect.any(Number),
+    });
+  });
+
+  it("keeps reply behavior normal when episode recording throws", async () => {
+    state.discordTurnEpisodeRecordMock.mockImplementationOnce(() => {
+      throw new Error("record failed");
+    });
+    state.memoryIngestMock.mockResolvedValueOnce({ status: "skipped:no_trigger" });
+    state.runEmbeddedPiAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "normal model reply" }],
+      meta: {
+        finalAssistantVisibleText: "normal model reply",
+        completion: { stopReason: "stop" },
+      },
+    });
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    const result = await runAgentTurnWithFallback(
+      createMinimalRunAgentTurnParams({
+        opts: { runId: "run-record-fail-open" },
+      }) satisfies Parameters<typeof runAgentTurnWithFallback>[0],
+    );
+
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      expect(result.runResult.payloads?.[0]?.text).toBe("normal model reply");
+    }
+    expect(state.discordTurnEpisodeRecordMock).toHaveBeenCalledTimes(1);
   });
 
   it("continues normally when semantic memory ingest is disabled", async () => {

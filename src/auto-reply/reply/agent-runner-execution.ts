@@ -44,6 +44,7 @@ import { emitAgentEvent, onAgentEvent, registerAgentRunContext } from "../../inf
 import { formatErrorMessage } from "../../infra/errors.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { createCanonicalRememberBridge } from "../../memory/canonical-remember-bridge.js";
+import { createDiscordTurnEpisodeAdapter } from "../../memory/discord-turn-episode-adapter.js";
 import { createMemoryCandidateQueueAdapter } from "../../memory/memory-candidate-queue-adapter.js";
 import {
   createMemoryIngestAdapter,
@@ -135,6 +136,21 @@ export type AgentRunLoopResult =
 
 type EmbeddedAgentRunResult = Awaited<ReturnType<typeof runEmbeddedPiAgent>>;
 
+type DiscordTurnEpisodeRuntimeRecord = {
+  sessionKey: string;
+  runId: string;
+  userMessage: string;
+  provider: string;
+  model: string;
+  stopReason: string;
+  outcome: "success" | "short_circuit" | "failed";
+  durationMs: number;
+  assistantText?: string;
+  errorMessage?: string;
+  messageId?: string;
+  fallbackUsed?: boolean;
+};
+
 type FallbackSelectionState = Pick<
   SessionEntry,
   | "providerOverride"
@@ -217,6 +233,16 @@ function setFallbackSelectionStateField(
       return false;
   }
   throw new Error("Unsupported fallback selection state key");
+}
+
+function resolveDiscordTurnMessageId(sessionCtx: TemplateContext): string | undefined {
+  if (typeof sessionCtx.MessageSidFull === "string") {
+    return sessionCtx.MessageSidFull;
+  }
+  if (typeof sessionCtx.MessageSid === "string") {
+    return sessionCtx.MessageSid;
+  }
+  return undefined;
 }
 
 function snapshotFallbackSelectionState(entry: SessionEntry): FallbackSelectionState {
@@ -1130,6 +1156,38 @@ export async function runAgentTurnWithFallback(params: {
         };
 
   const runId = params.opts?.runId ?? crypto.randomUUID();
+  const discordTurnEpisodeAdapter = createDiscordTurnEpisodeAdapter({
+    log: (message) => autoReplyAgentRunnerLog.debug(message),
+  });
+  const turnStartedAt = Date.now();
+  const discordTurnMessageId = resolveDiscordTurnMessageId(params.sessionCtx);
+  const recordDiscordTurnEpisode = (record: DiscordTurnEpisodeRuntimeRecord): void => {
+    try {
+      void (
+        discordTurnEpisodeAdapter.record as unknown as (
+          params: DiscordTurnEpisodeRuntimeRecord,
+        ) => void
+      )(record);
+    } catch (error) {
+      autoReplyAgentRunnerLog.debug(
+        `[discord-turn-episode] record failed open: ${formatErrorMessage(error)}`,
+      );
+    }
+  };
+  const recordTurnFailed = (stopReason: string, errorMessage: string): void => {
+    recordDiscordTurnEpisode({
+      sessionKey: params.sessionKey ?? params.followupRun.run.sessionKey,
+      runId,
+      userMessage: params.commandBody,
+      provider: params.followupRun.run.provider,
+      model: params.followupRun.run.model,
+      stopReason,
+      outcome: "failed",
+      durationMs: Date.now() - turnStartedAt,
+      errorMessage,
+      ...(discordTurnMessageId !== undefined ? { messageId: discordTurnMessageId } : {}),
+    });
+  };
   const canonicalRememberBridge = createCanonicalRememberBridge({
     adapter: createMemoryCandidateQueueAdapter({
       log: (message) => {
@@ -1145,6 +1203,7 @@ export async function runAgentTurnWithFallback(params: {
     }),
     log: (message) => autoReplyAgentRunnerLog.info(message),
   });
+  const canonicalMessageId = discordTurnMessageId;
   autoReplyAgentRunnerLog.info(
     "[canonical-remember-bridge] seam=auto-reply-agent-runner divert-start",
   );
@@ -1157,12 +1216,7 @@ export async function runAgentTurnWithFallback(params: {
     sessionKey: params.sessionKey ?? params.followupRun.run.sessionKey,
     requestId: runId,
     provider: params.followupRun.run.messageProvider ?? params.sessionCtx.Provider,
-    messageId:
-      typeof params.sessionCtx.MessageSidFull === "string"
-        ? params.sessionCtx.MessageSidFull
-        : typeof params.sessionCtx.MessageSid === "string"
-          ? params.sessionCtx.MessageSid
-          : undefined,
+    messageId: canonicalMessageId,
   });
   autoReplyAgentRunnerLog.info(
     `[canonical-remember-bridge] seam=auto-reply-agent-runner divert-result diverted=${canonicalDivertResult.diverted}`,
@@ -1171,6 +1225,18 @@ export async function runAgentTurnWithFallback(params: {
     autoReplyAgentRunnerLog.info(
       "[canonical-remember-bridge] seam=auto-reply-agent-runner short-circuit reason=canonical-diverted",
     );
+    recordDiscordTurnEpisode({
+      sessionKey: params.sessionKey ?? params.followupRun.run.sessionKey,
+      runId,
+      userMessage: params.commandBody,
+      provider: params.followupRun.run.provider,
+      model: params.followupRun.run.model,
+      stopReason: "canonical_remember_diverted",
+      outcome: "short_circuit",
+      durationMs: Date.now() - turnStartedAt,
+      assistantText: canonicalDivertResult.acknowledgment,
+      ...(discordTurnMessageId !== undefined ? { messageId: discordTurnMessageId } : {}),
+    });
     return {
       kind: "success",
       runId,
@@ -1225,6 +1291,18 @@ export async function runAgentTurnWithFallback(params: {
       `[memory-ingest] seam=auto-reply-agent-runner short-circuit reason=semantic-trigger-matched status=${memoryIngestResult.status}`,
     );
     const acknowledgment = resolveSemanticMemoryIngestAcknowledgment(memoryIngestResult.status);
+    recordDiscordTurnEpisode({
+      sessionKey: params.sessionKey ?? params.followupRun.run.sessionKey,
+      runId,
+      userMessage: params.commandBody,
+      provider: params.followupRun.run.provider,
+      model: params.followupRun.run.model,
+      stopReason: SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON,
+      outcome: "short_circuit",
+      durationMs: Date.now() - turnStartedAt,
+      assistantText: acknowledgment,
+      ...(discordTurnMessageId !== undefined ? { messageId: discordTurnMessageId } : {}),
+    });
     return {
       kind: "success",
       runId,
@@ -2176,6 +2254,7 @@ export async function runAgentTurnWithFallback(params: {
       ) {
         didResetAfterCompactionFailure = true;
         params.replyOperation?.fail("run_failed", embeddedError);
+        recordTurnFailed("context_overflow_recovered", embeddedError.message);
         return {
           kind: "final",
           payload: markAgentRunFailureReplyPayload({
@@ -2193,6 +2272,7 @@ export async function runAgentTurnWithFallback(params: {
         const didReset = await params.resetSessionAfterRoleOrderingConflict(embeddedError.message);
         if (didReset) {
           params.replyOperation?.fail("run_failed", embeddedError);
+          recordTurnFailed("role_ordering_reset", embeddedError.message);
           return {
             kind: "final",
             payload: markAgentRunFailureReplyPayload({
@@ -2225,6 +2305,7 @@ export async function runAgentTurnWithFallback(params: {
                 "The requested model may be temporarily unavailable. Please try again shortly."
               : "⚠️ Model switch could not be completed. The requested model may be temporarily unavailable. Please try again shortly.";
           params.replyOperation?.fail("run_failed", err);
+          recordTurnFailed("model_switch_failed", formatErrorMessage(err));
           return {
             kind: "final",
             payload: markAgentRunFailureReplyPayload({
@@ -2302,6 +2383,7 @@ export async function runAgentTurnWithFallback(params: {
       ) {
         didResetAfterCompactionFailure = true;
         params.replyOperation?.fail("run_failed", err);
+        recordTurnFailed("compaction_recovered", message);
         return {
           kind: "final",
           payload: markAgentRunFailureReplyPayload({
@@ -2320,6 +2402,7 @@ export async function runAgentTurnWithFallback(params: {
         const didReset = await params.resetSessionAfterRoleOrderingConflict(message);
         if (didReset) {
           params.replyOperation?.fail("run_failed", err);
+          recordTurnFailed("role_ordering_reset", message);
           return {
             kind: "final",
             payload: markAgentRunFailureReplyPayload({
@@ -2367,6 +2450,7 @@ export async function runAgentTurnWithFallback(params: {
         }
 
         params.replyOperation?.fail("session_corruption_reset", err);
+        recordTurnFailed("session_corruption_reset", message);
         return {
           kind: "final",
           payload: markAgentRunFailureReplyPayload({
@@ -2441,6 +2525,7 @@ export async function runAgentTurnWithFallback(params: {
       });
 
       params.replyOperation?.fail("run_failed", err);
+      recordTurnFailed("error", message);
       return {
         kind: "final",
         payload: markAgentRunFailureReplyPayload({
@@ -2461,6 +2546,7 @@ export async function runAgentTurnWithFallback(params: {
     const errorMsg = finalEmbeddedError.message ?? "";
     if (isContextOverflowError(errorMsg)) {
       params.replyOperation?.fail("run_failed", finalEmbeddedError);
+      recordTurnFailed("context_overflow", errorMsg);
       return {
         kind: "final",
         payload: markAgentRunFailureReplyPayload({
@@ -2516,6 +2602,30 @@ export async function runAgentTurnWithFallback(params: {
       payloads: runResult.payloads,
     });
   }
+
+  const finalMeta = runResult?.meta as
+    | {
+        completion?: { stopReason?: unknown };
+        finalAssistantVisibleText?: unknown;
+      }
+    | undefined;
+  const finalStopReason = readStringValue(finalMeta?.completion?.stopReason) ?? "unknown";
+  const finalAssistantVisibleText = readStringValue(finalMeta?.finalAssistantVisibleText);
+  recordDiscordTurnEpisode({
+    sessionKey: params.sessionKey ?? params.followupRun.run.sessionKey,
+    runId,
+    userMessage: params.commandBody,
+    provider: fallbackProvider || params.followupRun.run.provider,
+    model: fallbackModel || params.followupRun.run.model,
+    stopReason: finalStopReason,
+    outcome: "success",
+    durationMs: Date.now() - turnStartedAt,
+    ...(finalAssistantVisibleText !== undefined
+      ? { assistantText: finalAssistantVisibleText }
+      : {}),
+    ...(discordTurnMessageId !== undefined ? { messageId: discordTurnMessageId } : {}),
+    ...(fallbackAttempts.length > 0 ? { fallbackUsed: true } : {}),
+  });
 
   return {
     kind: "success",
