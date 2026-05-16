@@ -146,10 +146,11 @@ vi.mock("../../memory/memory-candidate-queue-adapter.js", () => ({
   }),
 }));
 
-vi.mock("../../memory/memory-ingest-adapter.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../memory/memory-ingest-adapter.js")>();
+vi.mock(import("../../memory/memory-ingest-adapter.js"), async (importOriginal) => {
+  const actual = await importOriginal();
   return {
     ...actual,
+    containsForbiddenSubstring: actual.containsForbiddenSubstring,
     createMemoryIngestAdapter: () => ({
       ingest: state.memoryIngestMock,
     }),
