@@ -146,32 +146,36 @@ vi.mock("../../memory/memory-candidate-queue-adapter.js", () => ({
   }),
 }));
 
-vi.mock("../../memory/memory-ingest-adapter.js", () => ({
-  createMemoryIngestAdapter: () => ({
-    ingest: state.memoryIngestMock,
-  }),
-  isSemanticMemoryIngestHandled: (status: string) =>
-    status !== "skipped:disabled" && status !== "skipped:no_trigger",
-  resolveSemanticMemoryIngestAcknowledgment: (status: string) => {
-    switch (status) {
-      case "succeeded":
-        return "Semantic memory stored.";
-      case "detached":
-        return "Semantic memory queued for storage.";
-      case "timeout":
-        return "Semantic memory storage timed out; the write may complete in the background.";
-      case "failed":
-        return "Semantic memory storage failed.";
-      case "skipped:empty":
-        return "Nothing to store as semantic memory.";
-      case "skipped:wrapped":
-        return "Semantic memory ingest skipped because the prompt was already wrapped.";
-      default:
-        return "Semantic memory request handled.";
-    }
-  },
-  SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON: "semantic_memory_ingest_handled",
-}));
+vi.mock("../../memory/memory-ingest-adapter.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../memory/memory-ingest-adapter.js")>();
+  return {
+    ...actual,
+    createMemoryIngestAdapter: () => ({
+      ingest: state.memoryIngestMock,
+    }),
+    isSemanticMemoryIngestHandled: (status: string) =>
+      status !== "skipped:disabled" && status !== "skipped:no_trigger",
+    resolveSemanticMemoryIngestAcknowledgment: (status: string) => {
+      switch (status) {
+        case "succeeded":
+          return "Semantic memory stored.";
+        case "detached":
+          return "Semantic memory queued for storage.";
+        case "timeout":
+          return "Semantic memory storage timed out; the write may complete in the background.";
+        case "failed":
+          return "Semantic memory storage failed.";
+        case "skipped:empty":
+          return "Nothing to store as semantic memory.";
+        case "skipped:wrapped":
+          return "Semantic memory ingest skipped because the prompt was already wrapped.";
+        default:
+          return "Semantic memory request handled.";
+      }
+    },
+    SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON: "semantic_memory_ingest_handled",
+  };
+});
 
 vi.mock("../../runtime.js", () => ({
   defaultRuntime: {
