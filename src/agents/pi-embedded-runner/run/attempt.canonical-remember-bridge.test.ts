@@ -38,7 +38,7 @@ describe("runEmbeddedAttempt canonical-remember bridge wiring", () => {
     );
   });
 
-  it("invokes divert BEFORE the semantic ingest and the late-bound memory-context inject", async () => {
+  it("invokes divert BEFORE semantic ingest, candidate queue, and late-bound memory-context inject", async () => {
     const source = await readFile(SOURCE_FILE, "utf8");
     const divertIdx = source.search(
       /const\s+canonicalDivertResult\s*=\s*await\s+canonicalRememberBridge\.divert\(/,
@@ -49,7 +49,9 @@ describe("runEmbeddedAttempt canonical-remember bridge wiring", () => {
     const enqueueIdx = source.search(
       /const\s+candidateQueueResult\s*=\s*await\s+memoryCandidateQueue\.enqueue\(\s*params\.prompt\b/,
     );
-    const injectIdx = source.indexOf("const submittedPrompt = await memoryInjector.inject({");
+    const injectIdx = source.indexOf(
+      "const promptForModelWithMemory = await memoryInjector.inject({",
+    );
     expect(divertIdx).toBeGreaterThan(-1);
     expect(ingestIdx).toBeGreaterThan(-1);
     expect(enqueueIdx).toBeGreaterThan(-1);
