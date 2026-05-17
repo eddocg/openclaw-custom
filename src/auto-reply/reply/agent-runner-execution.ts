@@ -1163,11 +1163,7 @@ export async function runAgentTurnWithFallback(params: {
   const discordTurnMessageId = resolveDiscordTurnMessageId(params.sessionCtx);
   const recordDiscordTurnEpisode = (record: DiscordTurnEpisodeRuntimeRecord): void => {
     try {
-      void (
-        discordTurnEpisodeAdapter.record as unknown as (
-          params: DiscordTurnEpisodeRuntimeRecord,
-        ) => void
-      )(record);
+      discordTurnEpisodeAdapter.record(record);
     } catch (error) {
       autoReplyAgentRunnerLog.debug(
         `[discord-turn-episode] record failed open: ${formatErrorMessage(error)}`,

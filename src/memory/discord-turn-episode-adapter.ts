@@ -6,7 +6,7 @@ const DEFAULT_MAX_TEXT_CHARS = 16_000;
 const DISCORD_TURN_CLI_MODULE = "openclaw_memory_core.integration.discord_turn_cli";
 const DISCORD_TURN_CLI_SUBCOMMAND = "record";
 
-export type DiscordTurnEpisodeOutcome = "completed" | "short_circuit" | "failed";
+export type DiscordTurnEpisodeOutcome = "success" | "short_circuit" | "failed";
 
 export type DiscordTurnEpisodeRecordParams = {
   sessionKey: string;
