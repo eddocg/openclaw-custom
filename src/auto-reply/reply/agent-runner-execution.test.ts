@@ -768,6 +768,7 @@ describe("runAgentTurnWithFallback", () => {
     expect(state.runEmbeddedPiAgentMock).toHaveBeenCalledTimes(1);
     expectMockCallArgFields(state.discordTurnEpisodeRecordMock, 0, "discord turn record", {
       sessionKey: "main",
+      channel: "discord",
       runId: "run-success-1",
       userMessage: "what is the weather today",
       provider: "anthropic",

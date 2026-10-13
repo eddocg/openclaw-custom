@@ -1,6 +1,6 @@
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, type Mock } from "vitest";
 import {
   createDiscordTurnEpisodeAdapter,
   type DiscordTurnEpisodeRecordParams,
@@ -13,14 +13,16 @@ type SpawnCall = {
   options: SpawnOptions;
 };
 
-type FakeChild = ChildProcess & {
+type FakeChild = Omit<ChildProcess, "unref" | "kill"> & {
   emitError: (error: Error) => void;
-  unref: ReturnType<typeof vi.fn>;
+  unref: Mock<() => void>;
+  kill: Mock<(signal?: NodeJS.Signals | number) => boolean>;
 };
 
 function createFakeChild(): FakeChild {
   const child = new EventEmitter() as unknown as FakeChild;
-  child.unref = vi.fn();
+  child.unref = vi.fn<() => void>();
+  child.kill = vi.fn<(signal?: NodeJS.Signals | number) => boolean>(() => true);
   child.emitError = (error) => child.emit("error", error);
   return child;
 }
@@ -35,7 +37,7 @@ function buildSpawn(): {
   const spawnFn = vi.fn(
     (command: string, args: ReadonlyArray<string>, options: SpawnOptions): ChildProcess => {
       calls.push({ command, args, options });
-      return child;
+      return child as unknown as ChildProcess;
     },
   );
 
@@ -50,6 +52,7 @@ function makeParams(
   overrides: Partial<DiscordTurnEpisodeRecordParams> = {},
 ): DiscordTurnEpisodeRecordParams {
   return {
+    channel: "discord",
     sessionKey: "discord:guild:channel:thread",
     runId: "run-123",
     userMessage: "what should I do?",
@@ -73,6 +76,7 @@ function valueAfter(args: ReadonlyArray<string>, flag: string): string {
 
 const ENABLED_ENV: NodeJS.ProcessEnv = {
   OPENCLAW_MEMORY_ENABLED: "true",
+  OPENCLAW_MEMORY_DISCORD_TURN_ENABLED: "true",
   OPENCLAW_MEMORY_CORE_DSN: "postgres://memory-core",
 };
 
@@ -89,7 +93,7 @@ describe("createDiscordTurnEpisodeAdapter", () => {
     const spawn = buildSpawn();
     const log = vi.fn();
     const adapter = createDiscordTurnEpisodeAdapter({
-      env: { OPENCLAW_MEMORY_ENABLED: "true" },
+      env: { OPENCLAW_MEMORY_ENABLED: "true", OPENCLAW_MEMORY_DISCORD_TURN_ENABLED: "true" },
       spawn: spawn.spawn,
       log,
     });
@@ -119,10 +123,6 @@ describe("createDiscordTurnEpisodeAdapter", () => {
       "-m",
       "openclaw_memory_core.integration.discord_turn_cli",
       "record",
-      "--dsn",
-      "postgres://memory-core",
-      "--session-key",
-      "discord:guild:channel:thread",
       "--run-id",
       "run-123",
       "--user-message",
@@ -137,6 +137,8 @@ describe("createDiscordTurnEpisodeAdapter", () => {
       "success",
       "--duration-ms",
       "1234",
+      "--session-key",
+      "discord:guild:channel:thread",
       "--assistant-text",
       "do the thing",
       "--message-id",
@@ -148,6 +150,59 @@ describe("createDiscordTurnEpisodeAdapter", () => {
       stdio: "ignore",
     });
     expect(spawn.child.unref).toHaveBeenCalledTimes(1);
+    expect(call.args.join(" ")).not.toContain("postgres://memory-core");
+  });
+
+  it("does not spawn without the dedicated Discord turn opt-in", () => {
+    const spawn = buildSpawn();
+    const adapter = createDiscordTurnEpisodeAdapter({
+      env: { OPENCLAW_MEMORY_ENABLED: "true", OPENCLAW_MEMORY_CORE_DSN: "postgres://memory-core" },
+      spawn: spawn.spawn,
+    });
+
+    adapter.record(makeParams());
+
+    expect(spawn.calls).toHaveLength(0);
+  });
+
+  it.each([undefined, "telegram", "slack"])("does not spawn for non-Discord channel %s", (channel) => {
+    const spawn = buildSpawn();
+    const adapter = createDiscordTurnEpisodeAdapter({ env: ENABLED_ENV, spawn: spawn.spawn });
+
+    adapter.record(makeParams({ channel }));
+
+    expect(spawn.calls).toHaveLength(0);
+  });
+
+  it("kills the recorder after the timeout and clears the timer on exit", () => {
+    vi.useFakeTimers();
+    try {
+      const log = vi.fn();
+      const slow = buildSpawn();
+      createDiscordTurnEpisodeAdapter({
+        env: ENABLED_ENV,
+        spawn: slow.spawn,
+        log,
+        timeoutMs: 1_000,
+      }).record(makeParams());
+      vi.advanceTimersByTime(1_000);
+      expect(slow.child.kill).toHaveBeenCalledWith("SIGKILL");
+      expect(log).toHaveBeenCalledWith(
+        "[discord-turn-episode] record subprocess timed out after 1000ms",
+      );
+
+      const fast = buildSpawn();
+      createDiscordTurnEpisodeAdapter({
+        env: ENABLED_ENV,
+        spawn: fast.spawn,
+        timeoutMs: 1_000,
+      }).record(makeParams());
+      fast.child.emit("exit", 0, null);
+      vi.advanceTimersByTime(1_000);
+      expect(fast.child.kill).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("passes short_circuit outcome correctly", () => {
@@ -176,6 +231,15 @@ describe("createDiscordTurnEpisodeAdapter", () => {
     const args = spawn.calls[0]!.args;
     expect(valueAfter(args, "--outcome")).toBe("failed");
     expect(valueAfter(args, "--error-message")).toBe("model exploded");
+  });
+
+  it("omits the session key flag when no session key is known", () => {
+    const spawn = buildSpawn();
+    const adapter = createDiscordTurnEpisodeAdapter({ env: ENABLED_ENV, spawn: spawn.spawn });
+
+    adapter.record(makeParams({ sessionKey: undefined }));
+
+    expect(spawn.calls[0]!.args).not.toContain("--session-key");
   });
 
   it("includes fallback-used flag when true", () => {

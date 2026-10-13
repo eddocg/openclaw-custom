@@ -137,7 +137,7 @@ export type AgentRunLoopResult =
 type EmbeddedAgentRunResult = Awaited<ReturnType<typeof runEmbeddedPiAgent>>;
 
 type DiscordTurnEpisodeRuntimeRecord = {
-  sessionKey: string;
+  sessionKey?: string;
   runId: string;
   userMessage: string;
   provider: string;
@@ -1161,9 +1161,10 @@ export async function runAgentTurnWithFallback(params: {
   });
   const turnStartedAt = Date.now();
   const discordTurnMessageId = resolveDiscordTurnMessageId(params.sessionCtx);
+  const discordTurnChannel = params.followupRun.run.messageProvider ?? params.sessionCtx.Provider;
   const recordDiscordTurnEpisode = (record: DiscordTurnEpisodeRuntimeRecord): void => {
     try {
-      discordTurnEpisodeAdapter.record(record);
+      discordTurnEpisodeAdapter.record({ ...record, channel: discordTurnChannel });
     } catch (error) {
       autoReplyAgentRunnerLog.debug(
         `[discord-turn-episode] record failed open: ${formatErrorMessage(error)}`,
