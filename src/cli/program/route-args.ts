@@ -200,6 +200,7 @@ export function parseModelsListRouteArgs(argv: string[]) {
     local: hasFlag(argv, "--local"),
     json: hasFlag(argv, "--json"),
     plain: hasFlag(argv, "--plain"),
+    refresh: hasFlag(argv, "--refresh"),
   };
 }
 

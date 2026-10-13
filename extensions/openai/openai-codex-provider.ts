@@ -530,12 +530,16 @@ export function buildOpenAICodexProviderPlugin(
         }
         const provider = buildOpenAICodexProvider();
         const discovery = await discoverOpenAICodexModels(ctx, deps);
-        // Only rows the signed-in account lists are written; any failure keeps
-        // the previous behavior (built-in pi-ai rows, no discovered additions).
-        return {
-          provider:
-            discovery.status === "ready" ? { ...provider, models: discovery.models } : provider,
-        };
+        if (discovery.status === "ready") {
+          return { provider: { ...provider, models: discovery.models } };
+        }
+        if (discovery.status === "unavailable") {
+          // No entry: models.json merge mode keeps the last discovered rows, so a
+          // transient outage neither wipes nor fakes the account's model list.
+          return null;
+        }
+        // auth-rejected clears stale discovered rows; skipped keeps the base entry.
+        return { provider };
       },
     },
     resolveDynamicModel: (ctx) => resolveCodexForwardCompatModel(ctx),

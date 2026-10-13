@@ -47,6 +47,7 @@ export async function modelsListCommand(
     provider?: string;
     json?: boolean;
     plain?: boolean;
+    refresh?: boolean;
   },
   runtime: RuntimeEnv,
 ) {
@@ -86,6 +87,15 @@ export async function modelsListCommand(
   const authStore = loadAuthProfileStoreWithoutExternalProfiles(agentDir);
   const workspaceDir =
     resolveAgentWorkspaceDir(cfg, resolveDefaultAgentId(cfg)) ?? resolveDefaultAgentWorkspaceDir();
+  if (opts.refresh) {
+    // Listing only reads models.json; --refresh regenerates it first so live,
+    // account-scoped provider catalogs are re-run on demand.
+    const { ensureOpenClawModelsJson } = await import("../../agents/models-config.js");
+    await ensureOpenClawModelsJson(cfg, agentDir, {
+      workspaceDir,
+      ...(providerFilter ? { providerDiscoveryProviderIds: [providerFilter] } : {}),
+    });
+  }
   const authIndex = createModelListAuthIndex({ cfg, authStore, workspaceDir });
 
   let modelRegistry: ModelRegistry | undefined;

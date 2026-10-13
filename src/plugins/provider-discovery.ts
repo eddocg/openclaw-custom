@@ -42,6 +42,11 @@ export type ResolveRuntimePluginDiscoveryProvidersParams = {
   requireCompleteDiscoveryEntryCoverage?: boolean;
   discoveryEntriesOnly?: boolean;
   pluginMetadataSnapshot?: PluginMetadataRegistryView;
+  /**
+   * Provider ids with stored auth profiles. Unscoped discovery also fully loads
+   * plugins without a discovery entry that own one of these providers.
+   */
+  credentialedProviderIds?: readonly string[];
 };
 
 export type ResolveInstalledPluginProviderContributionIdsParams = LoadPluginRegistryParams & {

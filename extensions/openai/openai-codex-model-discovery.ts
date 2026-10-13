@@ -9,9 +9,11 @@ import {
   DEFAULT_CONTEXT_TOKENS,
   type ModelDefinitionConfig,
 } from "openclaw/plugin-sdk/provider-model-shared";
+import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { fetchWithTimeout } from "openclaw/plugin-sdk/text-utility-runtime";
 import { OPENAI_CODEX_RESPONSES_BASE_URL } from "./base-url.js";
+import { resolveCodexAuthIdentity } from "./openai-codex-auth-identity.js";
 
 // Account-scoped ChatGPT/Codex model discovery, ported from upstream openclaw
 // (extensions/openai/codex-model-rows.ts + buildOpenAICodexModelFromLiveRow in
@@ -20,6 +22,7 @@ import { OPENAI_CODEX_RESPONSES_BASE_URL } from "./base-url.js";
 // `openai-codex` provider and the `openai-codex-responses` transport.
 
 const PROVIDER_ID = "openai-codex";
+const log = createSubsystemLogger("openai-codex/model-discovery");
 
 /**
  * The ChatGPT backend gates model rows on the reported Codex client version.
@@ -201,9 +204,18 @@ export function readCodexReasoningLevels(row: unknown): string[] | undefined {
   });
 }
 
+export class OpenAICodexModelDiscoveryShapeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OpenAICodexModelDiscoveryShapeError";
+  }
+}
+
 export function readCodexModelRows(body: unknown): unknown[] {
   if (!isRecord(body) || !Array.isArray(body.models)) {
-    throw new Error("OpenAI Codex model discovery response must be { models: [] }");
+    throw new OpenAICodexModelDiscoveryShapeError(
+      "OpenAI Codex model discovery response must be { models: [] }",
+    );
   }
   return body.models;
 }
@@ -357,11 +369,37 @@ export class OpenAICodexModelDiscoveryHttpError extends Error {
   }
 }
 
+/** Why live discovery could not produce an account-scoped model list. */
+export type OpenAICodexModelDiscoveryFailureReason =
+  | "token_resolution_failed"
+  | "token_unavailable"
+  | "http_rate_limited"
+  | "http_server_error"
+  | "http_error"
+  | "network"
+  | "tls"
+  | "timeout"
+  | "invalid_response";
+
+/** Where the `ChatGPT-Account-ID` header came from; never the value itself. */
+export type OpenAICodexAccountIdSource = "profile" | "token" | "missing";
+
 export type OpenAICodexModelDiscoveryResult =
-  | { status: "ready"; models: ModelDefinitionConfig[] }
-  | { status: "auth-rejected" }
-  | { status: "unavailable" }
-  | { status: "skipped" };
+  | {
+      status: "ready";
+      models: ModelDefinitionConfig[];
+      rowCount: number;
+      accountIdSource: OpenAICodexAccountIdSource;
+    }
+  | { status: "auth-rejected"; httpStatus: number; accountIdSource: OpenAICodexAccountIdSource }
+  | {
+      status: "unavailable";
+      reason: OpenAICodexModelDiscoveryFailureReason;
+      httpStatus?: number;
+      errorCode?: string;
+      accountIdSource?: OpenAICodexAccountIdSource;
+    }
+  | { status: "skipped"; reason: "test_environment" | "no_profiles" };
 
 export type OpenAICodexModelDiscoveryDeps = {
   fetchFn?: typeof fetch;
@@ -420,11 +458,29 @@ function readProfileAccountId(agentDir: string | undefined, profileId: string | 
   return typeof accountId === "string" && accountId.trim() ? accountId.trim() : undefined;
 }
 
+/**
+ * Stored profile metadata first (upstream behavior), then the access-token
+ * claim, which is what pi-ai's `openai-codex-responses` transport sends as
+ * `chatgpt-account-id` on model calls.
+ */
+function resolveDiscoveryAccountId(params: {
+  agentDir?: string;
+  profileId?: string;
+  token: string;
+}): { accountId?: string; source: OpenAICodexAccountIdSource } {
+  const fromProfile = readProfileAccountId(params.agentDir, params.profileId);
+  if (fromProfile) {
+    return { accountId: fromProfile, source: "profile" };
+  }
+  const fromToken = resolveCodexAuthIdentity({ accessToken: params.token }).accountId;
+  return fromToken ? { accountId: fromToken, source: "token" } : { source: "missing" };
+}
+
 async function fetchOpenAICodexModels(params: {
   token: string;
   accountId?: string;
   fetchFn: typeof fetch;
-}): Promise<ModelDefinitionConfig[]> {
+}): Promise<{ models: ModelDefinitionConfig[]; rowCount: number }> {
   const response = await fetchWithTimeout(
     resolveOpenAICodexModelsEndpoint(),
     {
@@ -441,15 +497,120 @@ async function fetchOpenAICodexModels(params: {
   if (!response.ok) {
     throw new OpenAICodexModelDiscoveryHttpError(response.status);
   }
-  return readCodexModelRows(await response.json())
-    .map((row) => buildOpenAICodexModelFromLiveRow(row))
-    .filter((model): model is ModelDefinitionConfig => Boolean(model));
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new OpenAICodexModelDiscoveryShapeError(
+      "OpenAI Codex model discovery response is not JSON",
+    );
+  }
+  const rows = readCodexModelRows(body);
+  return {
+    models: rows
+      .map((row) => buildOpenAICodexModelFromLiveRow(row))
+      .filter((model): model is ModelDefinitionConfig => Boolean(model)),
+    rowCount: rows.length,
+  };
+}
+
+const TLS_ERROR_CODE_PATTERN = /CERT|TLS|SSL|SELF_SIGNED|UNABLE_TO_VERIFY|UNABLE_TO_GET_ISSUER/u;
+const TIMEOUT_ERROR_CODES = new Set(["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT"]);
+
+function readSafeErrorCode(error: unknown): string | undefined {
+  // Only machine error codes (ECONNREFUSED, CERT_HAS_EXPIRED, ...) are kept;
+  // messages can echo URLs or headers and are never logged.
+  const record = error as { code?: unknown; cause?: { code?: unknown } } | undefined;
+  for (const candidate of [record?.cause?.code, record?.code]) {
+    if (typeof candidate === "string" && /^[A-Z0-9_]{1,64}$/u.test(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function classifyDiscoveryError(
+  error: unknown,
+  accountIdSource: OpenAICodexAccountIdSource,
+): OpenAICodexModelDiscoveryResult {
+  if (error instanceof OpenAICodexModelDiscoveryHttpError) {
+    if (error.status === 401 || error.status === 403) {
+      return { status: "auth-rejected", httpStatus: error.status, accountIdSource };
+    }
+    const reason =
+      error.status === 429
+        ? "http_rate_limited"
+        : error.status >= 500
+          ? "http_server_error"
+          : "http_error";
+    return { status: "unavailable", reason, httpStatus: error.status, accountIdSource };
+  }
+  if (error instanceof OpenAICodexModelDiscoveryShapeError) {
+    return { status: "unavailable", reason: "invalid_response", accountIdSource };
+  }
+  const errorCode = readSafeErrorCode(error);
+  const name = (error as { name?: unknown } | undefined)?.name;
+  const reason: OpenAICodexModelDiscoveryFailureReason =
+    name === "TimeoutError" ||
+    name === "AbortError" ||
+    (errorCode !== undefined && TIMEOUT_ERROR_CODES.has(errorCode))
+      ? "timeout"
+      : errorCode !== undefined && TLS_ERROR_CODE_PATTERN.test(errorCode)
+        ? "tls"
+        : "network";
+  return { status: "unavailable", reason, ...(errorCode ? { errorCode } : {}), accountIdSource };
+}
+
+/**
+ * Human-readable summary of a discovery outcome. Never includes the token,
+ * the account id, or the profile id (profile ids can embed an email).
+ */
+export function formatOpenAICodexModelDiscoveryOutcome(
+  result: OpenAICodexModelDiscoveryResult,
+): string {
+  switch (result.status) {
+    case "ready":
+      return result.models.length === 0
+        ? `ready with 0 eligible models (rows=${result.rowCount}, accountId=${result.accountIdSource})`
+        : `ready, ${result.models.length} account models (rows=${result.rowCount}, accountId=${result.accountIdSource})`;
+    case "auth-rejected":
+      return `auth-rejected (http=${result.httpStatus}, accountId=${result.accountIdSource}); no account models listed. Re-run \`openclaw models auth login --provider openai-codex\``;
+    case "unavailable": {
+      const details = [
+        `reason=${result.reason}`,
+        ...(result.httpStatus ? [`http=${result.httpStatus}`] : []),
+        ...(result.errorCode ? [`code=${result.errorCode}`] : []),
+        ...(result.accountIdSource ? [`accountId=${result.accountIdSource}`] : []),
+      ].join(", ");
+      return `unavailable (${details}); not live discovery, previously written and built-in models are kept`;
+    }
+    case "skipped":
+      return `skipped (reason=${result.reason})`;
+  }
+  return "unknown";
+}
+
+function logDiscoveryOutcome(result: OpenAICodexModelDiscoveryResult): void {
+  const message = `openai-codex model discovery: ${formatOpenAICodexModelDiscoveryOutcome(result)}`;
+  const meta = {
+    status: result.status,
+    ...("reason" in result ? { reason: result.reason } : {}),
+    ...("httpStatus" in result && result.httpStatus ? { httpStatus: result.httpStatus } : {}),
+    ...(result.status === "ready" ? { eligible: result.models.length, rows: result.rowCount } : {}),
+  };
+  if (result.status === "skipped") {
+    log.debug(message, meta);
+  } else if (result.status === "ready" && result.models.length > 0) {
+    log.info(message, meta);
+  } else {
+    log.warn(message, meta);
+  }
 }
 
 /**
  * Ask the ChatGPT backend which Codex models the signed-in account may use.
  * 401/403 means the account cannot list models (nothing is advertised); any
- * other failure is advisory and callers keep their static behavior.
+ * other failure is advisory and callers keep their previous behavior.
  */
 export async function discoverOpenAICodexModels(
   params: {
@@ -460,24 +621,32 @@ export async function discoverOpenAICodexModels(
   },
   deps: OpenAICodexModelDiscoveryDeps = {},
 ): Promise<OpenAICodexModelDiscoveryResult> {
+  const settle = (result: OpenAICodexModelDiscoveryResult) => {
+    logDiscoveryOutcome(result);
+    return result;
+  };
   const env = params.env ?? process.env;
   if (!deps.fetchFn && isTestEnvironment(env)) {
-    return { status: "skipped" };
+    return settle({ status: "skipped", reason: "test_environment" });
   }
   const authStore = ensureAuthProfileStoreForLocalUpdate(params.agentDir);
   if (listProfilesForProvider(authStore, PROVIDER_ID).length === 0) {
-    return { status: "skipped" };
+    return settle({ status: "skipped", reason: "no_profiles" });
   }
   let auth: { token: string; profileId?: string } | undefined;
   try {
     auth = await (deps.resolveAccessToken ?? resolveDefaultAccessToken)(params);
   } catch {
-    return { status: "unavailable" };
+    return settle({ status: "unavailable", reason: "token_resolution_failed" });
   }
   if (!auth) {
-    return { status: "unavailable" };
+    return settle({ status: "unavailable", reason: "token_unavailable" });
   }
-  const accountId = readProfileAccountId(params.agentDir, auth.profileId);
+  const { accountId, source: accountIdSource } = resolveDiscoveryAccountId({
+    agentDir: params.agentDir,
+    profileId: auth.profileId,
+    token: auth.token,
+  });
   const now = deps.now ?? Date.now;
   // Never keep the raw access token as a map key.
   const cacheKey = createHash("sha256")
@@ -485,20 +654,21 @@ export async function discoverOpenAICodexModels(
     .digest("hex");
   const cached = discoveryCache.get(cacheKey);
   if (cached && cached.expiresAt > now()) {
+    // Cache hits stay quiet; the fresh outcome was already logged.
     return await cached.result;
   }
-  const token = auth.token;
   const result = fetchOpenAICodexModels({
-    token,
+    token: auth.token,
     accountId,
     fetchFn: deps.fetchFn ?? fetch,
   }).then(
-    (models): OpenAICodexModelDiscoveryResult => ({ status: "ready", models }),
-    (error: unknown): OpenAICodexModelDiscoveryResult =>
-      error instanceof OpenAICodexModelDiscoveryHttpError &&
-      (error.status === 401 || error.status === 403)
-        ? { status: "auth-rejected" }
-        : { status: "unavailable" },
+    ({ models, rowCount }): OpenAICodexModelDiscoveryResult => ({
+      status: "ready",
+      models,
+      rowCount,
+      accountIdSource,
+    }),
+    (error: unknown) => classifyDiscoveryError(error, accountIdSource),
   );
   discoveryCache.set(cacheKey, { expiresAt: now() + OPENAI_CODEX_MODELS_CACHE_TTL_MS, result });
   const settled = await result;
@@ -506,5 +676,5 @@ export async function discoverOpenAICodexModels(
     // Do not pin transient failures for the whole TTL.
     discoveryCache.delete(cacheKey);
   }
-  return settled;
+  return settle(settled);
 }

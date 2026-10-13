@@ -43,6 +43,7 @@ export function registerModelsCli(program: Command) {
     .option("--provider <id>", "Filter by provider id")
     .option("--json", "Output JSON", false)
     .option("--plain", "Plain line output", false)
+    .option("--refresh", "Re-run provider catalog discovery before listing", false)
     .action(async (opts) => {
       await runModelsCommand(async () => {
         const { modelsListCommand } = await import("../commands/models/list.list-command.js");

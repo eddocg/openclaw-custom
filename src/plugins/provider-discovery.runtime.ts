@@ -1,3 +1,4 @@
+import { normalizeProviderId } from "../agents/provider-id.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { loadManifestMetadataSnapshot } from "./manifest-contract-eligibility.js";
 import type { PluginManifestRecord } from "./manifest-registry.js";
@@ -64,6 +65,15 @@ function hasProviderAuthEnvCredential(
   );
 }
 
+function hasCredentialedProvider(
+  plugin: PluginManifestRecord,
+  credentialedProviderIds: ReadonlySet<string>,
+): boolean {
+  return plugin.providers.some((providerId) =>
+    credentialedProviderIds.has(normalizeProviderId(providerId)),
+  );
+}
+
 function dedupeSorted(values: Iterable<string>): string[] {
   return [...new Set(values)].toSorted((left, right) => left.localeCompare(right));
 }
@@ -126,14 +136,24 @@ function resolveSelectiveFullPluginIds(params: {
   entryResult: ProviderDiscoveryEntryResult;
   entryProviders: ProviderPlugin[];
   env: NodeJS.ProcessEnv;
+  credentialedProviderIds?: readonly string[];
 }): string[] {
+  const credentialedProviderIds = new Set(
+    (params.credentialedProviderIds ?? []).map((providerId) => normalizeProviderId(providerId)),
+  );
   const staticOnlyEntryPluginIds = params.entryProviders
     .filter((provider) => !hasLiveProviderDiscoveryHook(provider))
     .map((provider) => provider.pluginId)
     .filter((pluginId): pluginId is string => typeof pluginId === "string" && pluginId !== "");
   const missingEntryCredentialPluginIds = params.entryResult.pluginRecords
     .filter((plugin) => !params.entryResult.entryPluginIds.has(plugin.id))
-    .filter((plugin) => hasProviderAuthEnvCredential(plugin, params.env))
+    // Credential-bounded: env auth, or a stored auth profile (OAuth-only
+    // providers such as ChatGPT sign-in have no env var to detect).
+    .filter(
+      (plugin) =>
+        hasProviderAuthEnvCredential(plugin, params.env) ||
+        hasCredentialedProvider(plugin, credentialedProviderIds),
+    )
     .map((plugin) => plugin.id);
   return dedupeSorted([...staticOnlyEntryPluginIds, ...missingEntryCredentialPluginIds]);
 }
@@ -147,9 +167,11 @@ export function resolvePluginDiscoveryProvidersRuntime(params: {
   requireCompleteDiscoveryEntryCoverage?: boolean;
   discoveryEntriesOnly?: boolean;
   pluginMetadataSnapshot?: PluginMetadataRegistryView;
+  credentialedProviderIds?: readonly string[];
 }): ProviderPlugin[] {
+  const { credentialedProviderIds, ...loadParams } = params;
   const env = params.env ?? process.env;
-  const entryResult = resolveProviderDiscoveryEntryPlugins({ ...params, env });
+  const entryResult = resolveProviderDiscoveryEntryPlugins({ ...loadParams, env });
   if (params.discoveryEntriesOnly === true) {
     return entryResult.providers;
   }
@@ -162,11 +184,12 @@ export function resolvePluginDiscoveryProvidersRuntime(params: {
       entryResult,
       entryProviders: entryResult.providers,
       env,
+      credentialedProviderIds,
     });
     const fullProviders =
       fullPluginIds.length > 0
         ? resolvePluginProviders({
-            ...params,
+            ...loadParams,
             env,
             onlyPluginIds: fullPluginIds,
             bundledProviderAllowlistCompat: true,
@@ -175,7 +198,7 @@ export function resolvePluginDiscoveryProvidersRuntime(params: {
     return [...liveEntryProviders, ...fullProviders];
   }
   return resolvePluginProviders({
-    ...params,
+    ...loadParams,
     env,
     bundledProviderAllowlistCompat: true,
   });

@@ -154,6 +154,63 @@ describe("resolvePluginDiscoveryProvidersRuntime", () => {
     );
   });
 
+  it("loads plugins without discovery entries that own a stored auth profile provider", () => {
+    const codexEntryProvider = createProvider({ id: "codex", mode: "catalog" });
+    const oauthProvider = createProvider({ id: "oauth-only", mode: "catalog" });
+    mocks.resolveDiscoveredProviderPluginIds.mockReturnValue(["codex", "oauth-host", "unused"]);
+    mocks.loadPluginMetadataSnapshot.mockReturnValue({
+      index: { plugins: [] },
+      manifestRegistry: {
+        plugins: [
+          createManifestPlugin("codex"),
+          {
+            ...createManifestPluginWithoutDiscovery({ id: "oauth-host" }),
+            providers: ["oauth-host", "OAuth-Only"],
+          },
+          createManifestPluginWithoutDiscovery({ id: "unused" }),
+        ],
+        diagnostics: [],
+      },
+    });
+    mocks.loadSource.mockReturnValue(codexEntryProvider);
+    mocks.resolvePluginProviders.mockReturnValue([oauthProvider]);
+
+    expect(
+      resolvePluginDiscoveryProvidersRuntime({
+        env: {} as NodeJS.ProcessEnv,
+        credentialedProviderIds: ["oauth-only"],
+      }),
+    ).toEqual([{ ...codexEntryProvider, pluginId: "codex" }, oauthProvider]);
+    expect(mocks.resolvePluginProviders).toHaveBeenCalledOnce();
+    expect(mocks.resolvePluginProviders).toHaveBeenCalledWith(
+      expect.objectContaining({ onlyPluginIds: ["oauth-host"] }),
+    );
+    expect(mocks.resolvePluginProviders.mock.calls[0]?.[0]).not.toHaveProperty(
+      "credentialedProviderIds",
+    );
+  });
+
+  it("does not load plugins without discovery entries when no credential exists", () => {
+    mocks.resolveDiscoveredProviderPluginIds.mockReturnValue(["codex", "oauth-host"]);
+    mocks.loadPluginMetadataSnapshot.mockReturnValue({
+      index: { plugins: [] },
+      manifestRegistry: {
+        plugins: [
+          createManifestPlugin("codex"),
+          createManifestPluginWithoutDiscovery({ id: "oauth-host" }),
+        ],
+        diagnostics: [],
+      },
+    });
+    mocks.loadSource.mockReturnValue(createProvider({ id: "codex", mode: "catalog" }));
+
+    resolvePluginDiscoveryProvidersRuntime({
+      env: {} as NodeJS.ProcessEnv,
+      credentialedProviderIds: ["someone-else"],
+    });
+    expect(mocks.resolvePluginProviders).not.toHaveBeenCalled();
+  });
+
   it("shares one metadata snapshot between provider id discovery and entry loading", () => {
     const registry = { plugins: [] };
     const manifestRegistry = {

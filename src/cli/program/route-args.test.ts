@@ -166,6 +166,7 @@ describe("route-args", () => {
         "--local",
         "--json",
         "--plain",
+        "--refresh",
       ]),
     ).toEqual({
       provider: "openai",
@@ -173,6 +174,7 @@ describe("route-args", () => {
       local: true,
       json: true,
       plain: true,
+      refresh: true,
     });
     expect(
       parseModelsStatusRouteArgs([

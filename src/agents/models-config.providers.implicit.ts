@@ -9,7 +9,10 @@ import {
   runProviderCatalog,
 } from "../plugins/provider-discovery.js";
 import { resolveOwningPluginIdsForProvider } from "../plugins/providers.js";
-import { ensureAuthProfileStore } from "./auth-profiles/store.js";
+import {
+  ensureAuthProfileStore,
+  ensureAuthProfileStoreWithoutExternalProfiles,
+} from "./auth-profiles/store.js";
 import {
   isNonSecretApiKeyMarker,
   resolveNonEnvSecretRefApiKeyMarker,
@@ -448,6 +451,23 @@ async function runProviderCatalogWithTimeout(
   }
 }
 
+// Persisted profiles only: this is a cheap plugin-selection hint, so it must not
+// trigger external CLI credential reads or keychain prompts.
+function listStoredAuthProfileProviderIds(agentDir: string | undefined): string[] {
+  const store = ensureAuthProfileStoreWithoutExternalProfiles(agentDir, {
+    allowKeychainPrompt: false,
+  });
+  const providerIds = new Set<string>();
+  for (const credential of Object.values(store.profiles)) {
+    const providerId =
+      typeof credential.provider === "string" ? normalizeProviderId(credential.provider) : "";
+    if (providerId) {
+      providerIds.add(providerId);
+    }
+  }
+  return [...providerIds].toSorted((left, right) => left.localeCompare(right));
+}
+
 export async function resolveImplicitProviders(
   params: ImplicitProviderParams,
 ): Promise<NonNullable<OpenClawConfig["models"]>["providers"]> {
@@ -472,6 +492,10 @@ export async function resolveImplicitProviders(
     config: params.config,
     workspaceDir: params.workspaceDir,
     env,
+    ...(params.providerDiscoveryProviderIds === undefined &&
+    params.providerDiscoveryEntriesOnly !== true
+      ? { credentialedProviderIds: listStoredAuthProfileProviderIds(params.agentDir) }
+      : {}),
     onlyPluginIds: resolveProviderDiscoveryFilter({
       config: params.config,
       workspaceDir: params.workspaceDir,
