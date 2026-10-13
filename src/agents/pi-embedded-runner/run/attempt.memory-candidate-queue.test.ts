@@ -49,7 +49,9 @@ describe("runEmbeddedAttempt memory-candidate-queue wiring", () => {
     const enqueueIdx = source.search(
       /const\s+candidateQueueResult\s*=\s*await\s+memoryCandidateQueue\.enqueue\(\s*params\.prompt\b/,
     );
-    const injectIdx = source.indexOf("const submittedPrompt = await memoryInjector.inject({");
+    const injectIdx = source.indexOf(
+      "const promptForModelWithMemory = await memoryInjector.inject({",
+    );
     expect(ingestIdx).toBeGreaterThan(-1);
     expect(enqueueIdx).toBeGreaterThan(-1);
     expect(injectIdx).toBeGreaterThan(-1);
@@ -60,8 +62,8 @@ describe("runEmbeddedAttempt memory-candidate-queue wiring", () => {
   it("does not call enqueue with a wrapped prompt (the adapter has its own wrapped-input guard)", async () => {
     const source = await readFile(SOURCE_FILE, "utf8");
 
-    expect(source).not.toMatch(/memoryCandidateQueue\.enqueue\(\s*submittedPrompt/);
-    expect(source).not.toMatch(/memoryCandidateQueue\.enqueue\(\s*effectivePrompt/);
+    expect(source).not.toMatch(/memoryCandidateQueue\.enqueue\(\s*promptForModelWithMemory/);
+    expect(source).not.toMatch(/memoryCandidateQueue\.enqueue\(\s*promptForModel/);
   });
 
   it("emits debug-gated seam markers around the enqueue call at INFO level", async () => {
