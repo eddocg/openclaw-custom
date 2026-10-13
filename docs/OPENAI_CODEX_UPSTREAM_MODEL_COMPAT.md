@@ -54,6 +54,7 @@ Everything is inside the `openai` extension, using public `openclaw/plugin-sdk/*
   - `augmentModelCatalog` only synthesizes the 5.4 / 5.4 Mini / 5.4 Pro / 5.5 Pro rows that the account lists. It returns none when the account is rejected.
   - `normalizeResolvedModel` maps the advertised efforts onto pi-ai's `thinkingLevelMap`, following the same pattern as the xai extension.
   - `gpt-6*` and `gpt-5.6*` count as modern Codex ids.
+  - `resolveDynamicModel` and `preferRuntimeResolvedModel` are intentionally unchanged. Discovered ids resolve from the `models.json` row, so an id the account does not list stays unknown instead of being synthesized from a template.
 - `thinking-policy.ts`: `gpt-6*` and `gpt-5.6*` get `xhigh`.
 - Tests: `openai-codex-model-discovery.test.ts` (17 new). The two existing augment tests now await the async hook.
 
@@ -92,8 +93,12 @@ Not changed:
 The tests use a fake auth profile and an injected `fetch`. **Not verified:**
 - live discovery against the account;
 - whether the backend accepts `gpt-5.6*` / `gpt-6*` on pi's `openai-codex-responses` transport;
-- whether `client_version=0.160.0` gates any rows;
+- whether `client_version=0.160.0` gates any rows. That value matches the `@openai/codex` version upstream bundles;
 - a real model call.
+
+Upstream behavior to watch for on the VM:
+- Upstream tests note that `gpt-6-astra` can be refused for ChatGPT-account Codex use on some paths, and upstream falls back to `gpt-6-luna`. Upstream commit `8b1add5c419` also requires discovery before offering Astra to OAuth users, which matches this branch. If Astra is listed but fails in step 6, prefer `gpt-6-sol` or `gpt-6-luna`.
+- Upstream hides `gpt-5.4` on ChatGPT hosts in favor of `gpt-5.6-terra`. This branch leaves `gpt-5.4` alone, because it passed the live probe.
 
 8. VM update instructions (after approval only)
 
