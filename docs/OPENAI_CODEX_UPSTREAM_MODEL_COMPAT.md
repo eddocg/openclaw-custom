@@ -4,7 +4,7 @@
 
 - Branch: `feature/openai-codex-upstream-models`, created from fork `main` `2d6350c546` (`2026.5.10-beta.1`).
 - Reference: `openclaw/openclaw` `main` `2b041e1613` (`2026.10.2`). The latest stable tag is `v2026.10.3`.
-- Status: implemented and unit-tested. It is **not merged and not deployed**, and it has not been run against a live ChatGPT account. It is waiting for architectural review.
+- Status: implemented and unit-tested. It is **not merged and not deployed**, and it has not been run against a live ChatGPT account. Architectural review approved it for VM testing. The merge decision follows live discovery and invocation tests on the VM.
 
 2. Fork compared with upstream
 
@@ -100,50 +100,55 @@ Upstream behavior to watch for on the VM:
 - Upstream tests note that `gpt-6-astra` can be refused for ChatGPT-account Codex use on some paths, and upstream falls back to `gpt-6-luna`. Upstream commit `8b1add5c419` also requires discovery before offering Astra to OAuth users, which matches this branch. If Astra is listed but fails in step 6, prefer `gpt-6-sol` or `gpt-6-luna`.
 - Upstream hides `gpt-5.4` on ChatGPT hosts in favor of `gpt-5.6-terra`. This branch leaves `gpt-5.4` alone, because it passed the live probe.
 
-8. VM update instructions (after approval only)
+8. VM update instructions (approved for VM testing)
 
-Run these on the gateway host as the user that runs OpenClaw. Do not print or copy credential files.
+Run these on the VM from the fork checkout, as the user that runs OpenClaw. The VM runs the gateway from source with `pnpm gateway:watch`, and every CLI call goes through `pnpm openclaw`. Do not print or copy credential files.
 
 1. Back up the state directory. It contains the credentials; keep the archive private.
    ```bash
    tar -czf ~/openclaw-state-backup-$(date +%Y%m%d).tgz -C ~ .openclaw
    ```
-2. Deploy the branch with the same mechanism that installed `2026.5.10-beta.1`. For a source checkout:
+2. Check out the branch. It adds no dependencies, so `pnpm install` only needs to confirm the lockfile.
    ```bash
    git fetch origin
-   git checkout feature/openai-codex-upstream-models   # or main after merge
+   git checkout feature/openai-codex-upstream-models
    pnpm install --frozen-lockfile
-   pnpm build
    ```
-3. Restart the gateway so the model catalog is regenerated:
+3. Restart the gateway so the model catalog is regenerated.
    ```bash
-   openclaw gateway restart
+   pnpm gateway:watch
    ```
+   - With a watcher already running, this restarts the gateway in its existing tmux session. Otherwise it starts a new session.
+   - With the default profile and port, the session is `openclaw-gateway-watch-main`.
+   - The watcher also rebuilds and restarts on its own when the checkout changes `src/` or `extensions/`. Rerunning it guarantees a fresh process, which re-runs discovery.
+   - Watch the tmux session for a clean start.
 4. Check discovery. GPT-6 / GPT-5.6 ids should appear only if the account has them:
    ```bash
-   openclaw models list --provider openai-codex
-   openclaw models list --provider openai-codex --json
+   pnpm openclaw models list --provider openai-codex
+   pnpm openclaw models list --provider openai-codex --json
    ```
 5. Check that auth still works:
    ```bash
-   openclaw models status --probe --probe-provider openai-codex
+   pnpm openclaw models status --probe --probe-provider openai-codex
    ```
-6. Invoke each newly listed model (example ids):
+6. Invoke each newly listed model. The ids below are examples; use the ones step 4 lists.
    ```bash
-   openclaw infer model run --local --model openai-codex/gpt-6-sol --prompt "Reply OK"
-   openclaw infer model run --local --model openai-codex/gpt-6-luna --prompt "Reply OK"
-   openclaw infer model run --local --model openai-codex/gpt-5.4 --prompt "Reply OK"
+   pnpm openclaw agent --local --model openai-codex/gpt-6-sol --message "Reply OK"
+   pnpm openclaw agent --local --model openai-codex/gpt-6-luna --message "Reply OK"
+   pnpm openclaw agent --local --model openai-codex/gpt-5.4 --message "Reply OK"
    ```
-7. Only when step 6 succeeds, change the default model in config. Example: set `agents.defaults.model.primary` to `openai-codex/gpt-6-sol`, then run `openclaw gateway restart`. If that model is not discovered, leave the current default as it is.
+7. Change the default model only when step 6 succeeds.
+   - Example: set `agents.defaults.model.primary` to `openai-codex/gpt-6-sol`, then run `pnpm gateway:watch` again to restart.
+   - If that model is not discovered, leave the current default as it is.
 8. Verify the memory and Discord paths with one Discord turn: the reply is delivered and the memory adapter logs a capture.
 
 **If the model list does not change:**
 - A listed model that fails at invocation means the backend rejected it on pi's transport. Remove it from config and report the error.
-- An empty discovery means 401/403. Re-pair with `openclaw models auth login --provider openai-codex`.
+- An empty discovery means 401/403. Re-pair with `pnpm openclaw models auth login --provider openai-codex`.
 
 **Rollback:**
-1. Redeploy fork `main` `2d6350c546`.
-2. Run `openclaw gateway restart`.
+1. Run `git checkout main`. Fork `main` is `2d6350c546`.
+2. Run `pnpm gateway:watch` to restart.
 3. Restore any changed `agents.defaults.model.primary`.
 
 No credential rollback is needed, because the branch does not change auth storage.
