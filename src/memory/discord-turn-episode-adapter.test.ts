@@ -165,14 +165,17 @@ describe("createDiscordTurnEpisodeAdapter", () => {
     expect(spawn.calls).toHaveLength(0);
   });
 
-  it.each([undefined, "telegram", "slack"])("does not spawn for non-Discord channel %s", (channel) => {
-    const spawn = buildSpawn();
-    const adapter = createDiscordTurnEpisodeAdapter({ env: ENABLED_ENV, spawn: spawn.spawn });
+  it.each([undefined, "telegram", "slack"])(
+    "does not spawn for non-Discord channel %s",
+    (channel) => {
+      const spawn = buildSpawn();
+      const adapter = createDiscordTurnEpisodeAdapter({ env: ENABLED_ENV, spawn: spawn.spawn });
 
-    adapter.record(makeParams({ channel }));
+      adapter.record(makeParams({ channel }));
 
-    expect(spawn.calls).toHaveLength(0);
-  });
+      expect(spawn.calls).toHaveLength(0);
+    },
+  );
 
   it("kills the recorder after the timeout and clears the timer on exit", () => {
     vi.useFakeTimers();
@@ -278,9 +281,7 @@ describe("createDiscordTurnEpisodeAdapter", () => {
     adapter.record(makeParams());
 
     expect(() => spawn.child.emitError(new Error("ENOENT"))).not.toThrow();
-    expect(log).toHaveBeenCalledWith(
-      "[discord-turn-episode] record subprocess error: ENOENT",
-    );
+    expect(log).toHaveBeenCalledWith("[discord-turn-episode] record subprocess error: ENOENT");
   });
 
   it("swallows and logs synchronous spawn throws", () => {
@@ -291,8 +292,6 @@ describe("createDiscordTurnEpisodeAdapter", () => {
     const adapter = createDiscordTurnEpisodeAdapter({ env: ENABLED_ENV, spawn, log });
 
     expect(() => adapter.record(makeParams())).not.toThrow();
-    expect(log).toHaveBeenCalledWith(
-      "[discord-turn-episode] record spawn failed: spawn boom",
-    );
+    expect(log).toHaveBeenCalledWith("[discord-turn-episode] record spawn failed: spawn boom");
   });
 });
