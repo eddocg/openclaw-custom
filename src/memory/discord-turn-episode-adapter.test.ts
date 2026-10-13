@@ -1,0 +1,297 @@
+import type { ChildProcess, SpawnOptions } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { describe, expect, it, vi, type Mock } from "vitest";
+import {
+  createDiscordTurnEpisodeAdapter,
+  type DiscordTurnEpisodeRecordParams,
+  type SpawnFn,
+} from "./discord-turn-episode-adapter.js";
+
+type SpawnCall = {
+  command: string;
+  args: ReadonlyArray<string>;
+  options: SpawnOptions;
+};
+
+type FakeChild = Omit<ChildProcess, "unref" | "kill"> & {
+  emitError: (error: Error) => void;
+  unref: Mock<() => void>;
+  kill: Mock<(signal?: NodeJS.Signals | number) => boolean>;
+};
+
+function createFakeChild(): FakeChild {
+  const child = new EventEmitter() as unknown as FakeChild;
+  child.unref = vi.fn<() => void>();
+  child.kill = vi.fn<(signal?: NodeJS.Signals | number) => boolean>(() => true);
+  child.emitError = (error) => child.emit("error", error);
+  return child;
+}
+
+function buildSpawn(): {
+  spawn: SpawnFn;
+  calls: SpawnCall[];
+  child: FakeChild;
+} {
+  const calls: SpawnCall[] = [];
+  const child = createFakeChild();
+  const spawnFn = vi.fn(
+    (command: string, args: ReadonlyArray<string>, options: SpawnOptions): ChildProcess => {
+      calls.push({ command, args, options });
+      return child as unknown as ChildProcess;
+    },
+  );
+
+  return {
+    spawn: ((...args) => spawnFn(...(args as Parameters<SpawnFn>))) as SpawnFn,
+    calls,
+    child,
+  };
+}
+
+function makeParams(
+  overrides: Partial<DiscordTurnEpisodeRecordParams> = {},
+): DiscordTurnEpisodeRecordParams {
+  return {
+    channel: "discord",
+    sessionKey: "discord:guild:channel:thread",
+    runId: "run-123",
+    userMessage: "what should I do?",
+    provider: "openai",
+    model: "gpt-5.5",
+    stopReason: "stop",
+    outcome: "success",
+    durationMs: 1234,
+    assistantText: "do the thing",
+    ...overrides,
+  };
+}
+
+function valueAfter(args: ReadonlyArray<string>, flag: string): string {
+  const index = args.indexOf(flag);
+  expect(index).toBeGreaterThanOrEqual(0);
+  const value = args[index + 1];
+  expect(value).toBeDefined();
+  return value!;
+}
+
+const ENABLED_ENV: NodeJS.ProcessEnv = {
+  OPENCLAW_MEMORY_ENABLED: "true",
+  OPENCLAW_MEMORY_DISCORD_TURN_ENABLED: "true",
+  OPENCLAW_MEMORY_CORE_DSN: "postgres://memory-core",
+};
+
+describe("createDiscordTurnEpisodeAdapter", () => {
+  it("does not spawn when memory is disabled or missing", () => {
+    const spawn = buildSpawn();
+    const adapter = createDiscordTurnEpisodeAdapter({ env: {}, spawn: spawn.spawn });
+
+    expect(() => adapter.record(makeParams())).not.toThrow();
+    expect(spawn.calls).toHaveLength(0);
+  });
+
+  it("does not spawn and logs when DSN is missing", () => {
+    const spawn = buildSpawn();
+    const log = vi.fn();
+    const adapter = createDiscordTurnEpisodeAdapter({
+      env: { OPENCLAW_MEMORY_ENABLED: "true", OPENCLAW_MEMORY_DISCORD_TURN_ENABLED: "true" },
+      spawn: spawn.spawn,
+      log,
+    });
+
+    adapter.record(makeParams());
+
+    expect(spawn.calls).toHaveLength(0);
+    expect(log).toHaveBeenCalledWith(
+      "[discord-turn-episode] skipped: OPENCLAW_MEMORY_CORE_DSN is not set",
+    );
+  });
+
+  it("spawns the discord turn CLI detached and unrefs the child", () => {
+    const spawn = buildSpawn();
+    const env: NodeJS.ProcessEnv = {
+      ...ENABLED_ENV,
+      OPENCLAW_MEMORY_CORE_PYTHON: "/opt/memory/python",
+    };
+    const adapter = createDiscordTurnEpisodeAdapter({ env, spawn: spawn.spawn });
+
+    adapter.record(makeParams({ messageId: "discord-message-1" }));
+
+    expect(spawn.calls).toHaveLength(1);
+    const call = spawn.calls[0]!;
+    expect(call.command).toBe("/opt/memory/python");
+    expect(call.args).toEqual([
+      "-m",
+      "openclaw_memory_core.integration.discord_turn_cli",
+      "record",
+      "--run-id",
+      "run-123",
+      "--user-message",
+      "what should I do?",
+      "--provider",
+      "openai",
+      "--model",
+      "gpt-5.5",
+      "--stop-reason",
+      "stop",
+      "--outcome",
+      "success",
+      "--duration-ms",
+      "1234",
+      "--session-key",
+      "discord:guild:channel:thread",
+      "--assistant-text",
+      "do the thing",
+      "--message-id",
+      "discord-message-1",
+    ]);
+    expect(call.options).toMatchObject({
+      detached: true,
+      env,
+      stdio: "ignore",
+    });
+    expect(spawn.child.unref).toHaveBeenCalledTimes(1);
+    expect(call.args.join(" ")).not.toContain("postgres://memory-core");
+  });
+
+  it("does not spawn without the dedicated Discord turn opt-in", () => {
+    const spawn = buildSpawn();
+    const adapter = createDiscordTurnEpisodeAdapter({
+      env: { OPENCLAW_MEMORY_ENABLED: "true", OPENCLAW_MEMORY_CORE_DSN: "postgres://memory-core" },
+      spawn: spawn.spawn,
+    });
+
+    adapter.record(makeParams());
+
+    expect(spawn.calls).toHaveLength(0);
+  });
+
+  it.each([undefined, "telegram", "slack"])(
+    "does not spawn for non-Discord channel %s",
+    (channel) => {
+      const spawn = buildSpawn();
+      const adapter = createDiscordTurnEpisodeAdapter({ env: ENABLED_ENV, spawn: spawn.spawn });
+
+      adapter.record(makeParams({ channel }));
+
+      expect(spawn.calls).toHaveLength(0);
+    },
+  );
+
+  it("kills the recorder after the timeout and clears the timer on exit", () => {
+    vi.useFakeTimers();
+    try {
+      const log = vi.fn();
+      const slow = buildSpawn();
+      createDiscordTurnEpisodeAdapter({
+        env: ENABLED_ENV,
+        spawn: slow.spawn,
+        log,
+        timeoutMs: 1_000,
+      }).record(makeParams());
+      vi.advanceTimersByTime(1_000);
+      expect(slow.child.kill).toHaveBeenCalledWith("SIGKILL");
+      expect(log).toHaveBeenCalledWith(
+        "[discord-turn-episode] record subprocess timed out after 1000ms",
+      );
+
+      const fast = buildSpawn();
+      createDiscordTurnEpisodeAdapter({
+        env: ENABLED_ENV,
+        spawn: fast.spawn,
+        timeoutMs: 1_000,
+      }).record(makeParams());
+      fast.child.emit("exit", 0, null);
+      vi.advanceTimersByTime(1_000);
+      expect(fast.child.kill).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("passes short_circuit outcome correctly", () => {
+    const spawn = buildSpawn();
+    const adapter = createDiscordTurnEpisodeAdapter({ env: ENABLED_ENV, spawn: spawn.spawn });
+
+    adapter.record(makeParams({ outcome: "short_circuit", assistantText: undefined }));
+
+    expect(valueAfter(spawn.calls[0]!.args, "--outcome")).toBe("short_circuit");
+    expect(spawn.calls[0]!.args).not.toContain("--assistant-text");
+  });
+
+  it("passes failed outcome and error message", () => {
+    const spawn = buildSpawn();
+    const adapter = createDiscordTurnEpisodeAdapter({ env: ENABLED_ENV, spawn: spawn.spawn });
+
+    adapter.record(
+      makeParams({
+        outcome: "failed",
+        stopReason: "error",
+        assistantText: undefined,
+        errorMessage: "model exploded",
+      }),
+    );
+
+    const args = spawn.calls[0]!.args;
+    expect(valueAfter(args, "--outcome")).toBe("failed");
+    expect(valueAfter(args, "--error-message")).toBe("model exploded");
+  });
+
+  it("omits the session key flag when no session key is known", () => {
+    const spawn = buildSpawn();
+    const adapter = createDiscordTurnEpisodeAdapter({ env: ENABLED_ENV, spawn: spawn.spawn });
+
+    adapter.record(makeParams({ sessionKey: undefined }));
+
+    expect(spawn.calls[0]!.args).not.toContain("--session-key");
+  });
+
+  it("includes fallback-used flag when true", () => {
+    const spawn = buildSpawn();
+    const adapter = createDiscordTurnEpisodeAdapter({ env: ENABLED_ENV, spawn: spawn.spawn });
+
+    adapter.record(makeParams({ fallbackUsed: true }));
+
+    expect(spawn.calls[0]!.args).toContain("--fallback-used");
+  });
+
+  it("truncates user message, assistant text, and error message", () => {
+    const spawn = buildSpawn();
+    const adapter = createDiscordTurnEpisodeAdapter({ env: ENABLED_ENV, spawn: spawn.spawn });
+    const longText = "x".repeat(20_000);
+
+    adapter.record(
+      makeParams({
+        userMessage: longText,
+        assistantText: longText,
+        errorMessage: longText,
+      }),
+    );
+
+    const args = spawn.calls[0]!.args;
+    expect(valueAfter(args, "--user-message")).toHaveLength(16_000);
+    expect(valueAfter(args, "--assistant-text")).toHaveLength(16_000);
+    expect(valueAfter(args, "--error-message")).toHaveLength(16_000);
+  });
+
+  it("swallows and logs asynchronous spawn errors", () => {
+    const spawn = buildSpawn();
+    const log = vi.fn();
+    const adapter = createDiscordTurnEpisodeAdapter({ env: ENABLED_ENV, spawn: spawn.spawn, log });
+
+    adapter.record(makeParams());
+
+    expect(() => spawn.child.emitError(new Error("ENOENT"))).not.toThrow();
+    expect(log).toHaveBeenCalledWith("[discord-turn-episode] record subprocess error: ENOENT");
+  });
+
+  it("swallows and logs synchronous spawn throws", () => {
+    const log = vi.fn();
+    const spawn: SpawnFn = vi.fn(() => {
+      throw new Error("spawn boom");
+    });
+    const adapter = createDiscordTurnEpisodeAdapter({ env: ENABLED_ENV, spawn, log });
+
+    expect(() => adapter.record(makeParams())).not.toThrow();
+    expect(log).toHaveBeenCalledWith("[discord-turn-episode] record spawn failed: spawn boom");
+  });
+});
