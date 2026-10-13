@@ -581,10 +581,10 @@ describe("openai codex provider", () => {
     });
   });
 
-  it("augments catalog with gpt-5.5-pro and gpt-5.4 native metadata", () => {
+  it("augments catalog with gpt-5.5-pro and gpt-5.4 native metadata", async () => {
     const provider = buildOpenAICodexProviderPlugin();
 
-    const entries = provider.augmentModelCatalog?.({
+    const entries = await provider.augmentModelCatalog?.({
       env: process.env,
       entries: [
         {
@@ -625,10 +625,10 @@ describe("openai codex provider", () => {
     });
   });
 
-  it("augments gpt-5.4-pro from catalog gpt-5.4 when legacy codex rows are absent", () => {
+  it("augments gpt-5.4-pro from catalog gpt-5.4 when legacy codex rows are absent", async () => {
     const provider = buildOpenAICodexProviderPlugin();
 
-    const entries = provider.augmentModelCatalog?.({
+    const entries = await provider.augmentModelCatalog?.({
       env: process.env,
       entries: [
         {

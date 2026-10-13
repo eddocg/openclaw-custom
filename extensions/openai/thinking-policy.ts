@@ -18,7 +18,16 @@ const OPENAI_XHIGH_MODEL_IDS = [
   "gpt-5.2",
 ] as const;
 
-const OPENAI_CODEX_XHIGH_MODEL_IDS = ["gpt-5.5", "gpt-5.5-pro", "gpt-5.4", "gpt-5.4-pro"] as const;
+// gpt-5.6 / gpt-6 families come only from account discovery; every upstream
+// variant advertises xhigh. pi-ai 0.73 has no `max` level, so it is not offered.
+const OPENAI_CODEX_XHIGH_MODEL_IDS = [
+  "gpt-6",
+  "gpt-5.6",
+  "gpt-5.5",
+  "gpt-5.5-pro",
+  "gpt-5.4",
+  "gpt-5.4-pro",
+] as const;
 
 function normalizeModelId(value: string): string {
   return value.trim().toLowerCase();

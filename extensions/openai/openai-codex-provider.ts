@@ -39,6 +39,11 @@ import { OPENAI_CODEX_DEFAULT_MODEL } from "./default-models.js";
 import { resolveCodexAuthIdentity } from "./openai-codex-auth-identity.js";
 import { buildOpenAICodexProvider } from "./openai-codex-catalog.js";
 import { loginOpenAICodexDeviceCode } from "./openai-codex-device-code.js";
+import {
+  discoverOpenAICodexModels,
+  type OpenAICodexModelDiscoveryDeps,
+  resolveOpenAICodexThinkingLevelMap,
+} from "./openai-codex-model-discovery.js";
 import { loginOpenAICodexOAuth } from "./openai-codex-oauth.runtime.js";
 import {
   buildOpenAIResponsesProviderHooks,
@@ -103,6 +108,8 @@ const OPENAI_CODEX_GPT_55_PRO_TEMPLATE_MODEL_IDS = [
   ...OPENAI_CODEX_GPT_54_TEMPLATE_MODEL_IDS,
 ] as const;
 const OPENAI_CODEX_MODERN_MODEL_IDS = [
+  "gpt-6",
+  "gpt-5.6",
   OPENAI_CODEX_GPT_55_MODEL_ID,
   OPENAI_CODEX_GPT_55_PRO_MODEL_ID,
   OPENAI_CODEX_GPT_54_MODEL_ID,
@@ -135,6 +142,21 @@ function normalizeCodexTransportFields(params: {
   const baseUrl =
     api === "openai-codex-responses" && useCodexTransport ? OPENAI_CODEX_BASE_URL : params.baseUrl;
   return { api, baseUrl };
+}
+
+/** Apply account-advertised reasoning efforts (discovered rows) to pi-ai's level map. */
+function withCodexThinkingLevelMap(model: ProviderRuntimeModel): ProviderRuntimeModel {
+  const derived = resolveOpenAICodexThinkingLevelMap(model);
+  if (!derived) {
+    return model;
+  }
+  const current = (model as { thinkingLevelMap?: Record<string, string | null | undefined> })
+    .thinkingLevelMap;
+  const merged = { ...derived, ...current };
+  if (current && Object.keys(merged).length === Object.keys(current).length) {
+    return model;
+  }
+  return { ...model, thinkingLevelMap: merged } as ProviderRuntimeModel;
 }
 
 function normalizeCodexTransport(model: ProviderRuntimeModel): ProviderRuntimeModel {
@@ -450,7 +472,9 @@ function buildOpenAICodexAuthDoctorHint(ctx: { profileId?: string }) {
   return "Deprecated profile. Run `openclaw models auth login --provider openai-codex` or `openclaw configure`.";
 }
 
-export function buildOpenAICodexProviderPlugin(): ProviderPlugin {
+export function buildOpenAICodexProviderPlugin(
+  deps: OpenAICodexModelDiscoveryDeps = {},
+): ProviderPlugin {
   return {
     id: PROVIDER_ID,
     label: "OpenAI Codex",
@@ -504,8 +528,13 @@ export function buildOpenAICodexProviderPlugin(): ProviderPlugin {
         if (listProfilesForProvider(authStore, PROVIDER_ID).length === 0) {
           return null;
         }
+        const provider = buildOpenAICodexProvider();
+        const discovery = await discoverOpenAICodexModels(ctx, deps);
+        // Only rows the signed-in account lists are written; any failure keeps
+        // the previous behavior (built-in pi-ai rows, no discovered additions).
         return {
-          provider: buildOpenAICodexProvider(),
+          provider:
+            discovery.status === "ready" ? { ...provider, models: discovery.models } : provider,
         };
       },
     },
@@ -532,7 +561,7 @@ export function buildOpenAICodexProviderPlugin(): ProviderPlugin {
       if (normalizeProviderId(ctx.provider) !== PROVIDER_ID) {
         return undefined;
       }
-      return normalizeCodexTransport(ctx.model);
+      return withCodexThinkingLevelMap(normalizeCodexTransport(ctx.model));
     },
     normalizeTransport: ({ provider, api, baseUrl }) => {
       if (normalizeProviderId(provider) !== PROVIDER_ID) {
@@ -548,7 +577,15 @@ export function buildOpenAICodexProviderPlugin(): ProviderPlugin {
     fetchUsageSnapshot: async (ctx) =>
       await fetchCodexUsage(ctx.token, ctx.accountId, ctx.timeoutMs, ctx.fetchFn),
     refreshOAuth: async (cred) => await refreshOpenAICodexOAuthCredential(cred),
-    augmentModelCatalog: (ctx) => {
+    augmentModelCatalog: async (ctx) => {
+      const discovery = await discoverOpenAICodexModels(ctx, deps);
+      if (discovery.status === "auth-rejected") {
+        return [];
+      }
+      const discoveredIds =
+        discovery.status === "ready"
+          ? new Set(discovery.models.map((model) => normalizeLowercaseStringOrEmpty(model.id)))
+          : undefined;
       const gpt54Template = findCatalogTemplate({
         entries: ctx.entries,
         providerId: PROVIDER_ID,
@@ -559,7 +596,7 @@ export function buildOpenAICodexProviderPlugin(): ProviderPlugin {
         providerId: PROVIDER_ID,
         templateIds: OPENAI_CODEX_GPT_55_PRO_TEMPLATE_MODEL_IDS,
       });
-      return [
+      const entries = [
         buildOpenAISyntheticCatalogEntry(gpt55ProTemplate, {
           id: OPENAI_CODEX_GPT_55_PRO_MODEL_ID,
           reasoning: true,
@@ -593,6 +630,10 @@ export function buildOpenAICodexProviderPlugin(): ProviderPlugin {
           cost: OPENAI_CODEX_GPT_54_MINI_COST,
         }),
       ].filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
+      // With live discovery, synthesize only rows the account actually lists.
+      return discoveredIds
+        ? entries.filter((entry) => discoveredIds.has(normalizeLowercaseStringOrEmpty(entry.id)))
+        : entries;
     },
   };
 }
