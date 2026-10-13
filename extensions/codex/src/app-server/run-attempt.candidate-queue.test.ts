@@ -184,7 +184,7 @@ describe("runCodexAppServerAttempt candidate-queue env contract", () => {
         kill: () => true,
         pid: 12345,
       } as never;
-    }) as unknown as Parameters<typeof createMemoryCandidateQueueAdapter>[0]["spawn"];
+    }) as unknown as NonNullable<Parameters<typeof createMemoryCandidateQueueAdapter>[0]>["spawn"];
     const log = vi.fn();
     const adapter = createMemoryCandidateQueueAdapter({
       env: {

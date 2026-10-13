@@ -174,7 +174,6 @@ vi.mock(import("../../memory/memory-ingest-adapter.js"), async (importOriginal) 
           return "Semantic memory request handled.";
       }
     },
-    SEMANTIC_MEMORY_INGEST_HANDLED_STOP_REASON: "semantic_memory_ingest_handled",
   };
 });
 
