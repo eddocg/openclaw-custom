@@ -57,7 +57,8 @@ describe("runCodexAppServerAttempt memory-candidate-queue wiring", () => {
       "const candidateQueueOutcome = await enqueueCodexAppServerCandidateQueue({ params });",
     );
     const ackIdx = source.indexOf("return buildCodexCandidateQueueAckResult({");
-    const clientFactoryIdx = source.indexOf("resolveCodexAppServerClientFactory()");
+    // Match the call site, not the function declaration earlier in the file.
+    const clientFactoryIdx = source.indexOf("= resolveCodexAppServerClientFactory();");
     const turnStartIdx = source.indexOf('"turn/start"');
     expect(enqueueIdx).toBeGreaterThan(-1);
     expect(ackIdx).toBeGreaterThan(enqueueIdx);
