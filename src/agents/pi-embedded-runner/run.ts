@@ -49,7 +49,6 @@ import {
   resolveFailoverStatus,
 } from "../failover-error.js";
 import { ensureSelectedAgentHarnessPlugin } from "../harness/runtime-plugin.js";
-import { selectAgentHarness } from "../harness/selection.js";
 import { LiveSessionModelSwitchError } from "../live-model-switch-error.js";
 import { shouldSwitchToLiveModel, clearLiveModelSwitchPending } from "../live-model-switch.js";
 import {
@@ -60,7 +59,6 @@ import {
   resolveAuthProfileOrder,
   shouldPreferExplicitConfigApiKeyAuth,
 } from "../model-auth.js";
-import { ensureOpenClawModelsJson } from "../models-config.js";
 import {
   retireSessionMcpRuntime,
   retireSessionMcpRuntimeForSessionKey,
@@ -99,7 +97,6 @@ import { hasMessagingToolDeliveryEvidence } from "./delivery-evidence.js";
 import { resolveEmbeddedRunFailureSignal } from "./failure-signal.js";
 import { resolveGlobalLane, resolveSessionLane } from "./lanes.js";
 import { log } from "./logger.js";
-import { resolveModelAsync } from "./model.js";
 import {
   createPostCompactionLoopGuard,
   PostCompactionLoopPersistedError,
@@ -118,6 +115,7 @@ import { resolveAuthProfileFailureReason } from "./run/auth-profile-failure-poli
 import { runEmbeddedAttemptWithBackend } from "./run/backend.js";
 import { createFailoverDecisionLogger } from "./run/failover-observation.js";
 import { mergeRetryFailoverReason, resolveRunFailoverDecision } from "./run/failover-policy.js";
+import { resolveEmbeddedRunHarnessAndModel } from "./run/harness-model-resolution.js";
 import {
   buildErrorAgentMeta,
   buildUsageAgentMetaFields,
@@ -539,39 +537,17 @@ export async function runEmbeddedPiAgent(
         sessionKey: params.sessionKey,
         workspaceDir: resolvedWorkspace,
       });
-      const agentHarness = selectAgentHarness({
-        provider,
-        modelId,
-        config: params.config,
-        agentId: params.agentId,
-        sessionKey: params.sessionKey,
-        agentHarnessId: params.agentHarnessId,
-      });
-      const pluginHarnessOwnsTransport = agentHarness.id !== "pi";
-      const dynamicModelResolution = await resolveModelAsync(
-        provider,
-        modelId,
-        agentDir,
-        params.config,
-        {
-          // Plugin dynamic model hooks can resolve explicit model refs without
-          // first generating PI models.json. This keeps one-shot model runs from
-          // blocking on unrelated provider discovery.
-          skipPiDiscovery: true,
+      const { agentHarness, pluginHarnessOwnsTransport, modelResolution } =
+        await resolveEmbeddedRunHarnessAndModel({
+          provider,
+          modelId,
+          config: params.config,
+          agentDir,
+          agentId: params.agentId,
+          sessionKey: params.sessionKey,
+          agentHarnessId: params.agentHarnessId,
           workspaceDir: resolvedWorkspace,
-        },
-      );
-      const modelResolution =
-        dynamicModelResolution.model || pluginHarnessOwnsTransport
-          ? dynamicModelResolution
-          : await (async () => {
-              await ensureOpenClawModelsJson(params.config, agentDir, {
-                workspaceDir: resolvedWorkspace,
-              });
-              return await resolveModelAsync(provider, modelId, agentDir, params.config, {
-                workspaceDir: resolvedWorkspace,
-              });
-            })();
+        });
       const { model, error, authStorage, modelRegistry } = modelResolution;
       if (!model) {
         throw new FailoverError(error ?? `Unknown model: ${provider}/${modelId}`, {

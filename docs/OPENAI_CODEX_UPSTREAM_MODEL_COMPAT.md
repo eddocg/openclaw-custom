@@ -4,8 +4,10 @@
 
 - Branch: `feature/openai-codex-upstream-models`, created from fork `main` `2d6350c546` (`2026.5.10-beta.1`).
 - Reference: `openclaw/openclaw` `main` `2b041e1613` (`2026.10.2`). The latest stable tag is `v2026.10.3`.
-- Status: implemented and tested locally, including the generated `models.json` and the `models list` output. It is **not merged and not deployed**, and it has not been run against a live ChatGPT account.
-- The first VM test showed no new models. Section 6 explains the root cause; it is fixed on this branch. The merge decision follows a repeat of the VM test in section 9.
+- Status: implemented and tested locally, including the generated `models.json` and the `models list` output. It is **not merged and not deployed**. Live discovery has been confirmed on the VM; a live model call on a discovered model has not.
+- The first VM test showed no new models. Section 6 explains the root cause; it is fixed on this branch.
+- The second VM test confirmed live discovery (`ready, 8 account models`), but `agent --local --model openai-codex/gpt-6-luna` failed with `Unknown model`. Section 8 explains why and gives the supported runtime pin.
+- The merge decision follows a repeat of the VM test in section 10.
 
 2. Fork compared with upstream
 
@@ -97,7 +99,7 @@ Discovery code ran in tests, but on the VM it never ran at all. Four separate ga
 2. **Nothing regenerated `models.json` on demand.**
    - `models list` only reads `models.json`.
    - Gateway startup prewarm uses discovery entries only, so it never runs the `openai-codex` catalog either.
-   - Restarting the gateway did not refresh the list, contrary to the earlier version of section 9.
+   - Restarting the gateway did not refresh the list, contrary to an earlier version of the VM instructions (now section 10).
    - **Fix:** `models list --refresh`.
 3. **Missing account header.**
    - Profiles created before account ids were stored have no `accountId`, so discovery sent no `ChatGPT-Account-ID` header.
@@ -111,7 +113,7 @@ Each fresh discovery outcome logs one line under the `openai-codex/model-discove
 
 | Log line (after `openai-codex model discovery:`) | Level | Meaning | Action |
 | --- | --- | --- | --- |
-| no line | n/a | Discovery was not invoked. | Use `--refresh` (section 9, step 4). Check that an `openai-codex` profile exists. |
+| no line | n/a | Discovery was not invoked. | Use `--refresh` (section 10, step 4). Check that an `openai-codex` profile exists. |
 | `skipped (reason=no_profiles)` | debug | No `openai-codex` auth profile exists. | Sign in with `models auth login --provider openai-codex`. |
 | `ready, N account models (rows=R, accountId=…)` | info | Live discovery succeeded. N rows were written. | None. |
 | `ready with 0 eligible models (rows=R, …)` | warn | The account returned rows, but none are picker-visible. | Account entitlement; nothing to fix locally. |
@@ -128,7 +130,56 @@ Each fresh discovery outcome logs one line under the `openai-codex/model-discove
 
 Every `unavailable` line ends with "not live discovery, previously written and built-in models are kept". Warnings reach stderr at the default log level. Set `OPENCLAW_LOG_LEVEL=debug` to also see `skipped`.
 
-8. Test results (local, macOS, Node 22)
+8. Agent runtime routing for discovered models
+
+**Second VM result.** Discovery logged `ready, 8 account models`, and `models.json` holds the rows on `openai-codex-responses`. `models list --refresh` shows `openai-codex/gpt-6-luna`, `ModelRegistry.find` finds it, and `agents.defaults.models` allows it. Even so, `agent --local --model openai-codex/gpt-6-luna` fails with `FailoverError: Unknown model`.
+
+**Root cause.** The run never reads `models.json` for this model:
+
+1. **Policy.** `resolveAgentHarnessPolicy` (`src/agents/harness/policy.ts`) maps an `openai-codex/*` ref with no runtime pin to the `codex` runtime. This is upstream design: legacy `openai-codex/*` refs run on the Codex app-server harness (https://docs.openclaw.ai/concepts/agent-runtimes).
+2. **Selection.** `selectAgentHarness` (`src/agents/harness/selection.ts`) treats any runtime other than `auto` as forced. It looks the `codex` harness up by id and does not call its `supports()`, which only accepts provider `codex`.
+3. **Lean resolution.** A plugin harness owns its transport, so the embedded runner resolves the model with `skipPiDiscovery: true`. That uses empty PI stores plus the OpenAI plugin's `resolveDynamicModel`, and never reads `models.json`.
+4. **Unknown id.** `resolveDynamicModel` knows the built-in forward-compat ids, such as `gpt-5.4`, but not ids that only account discovery returns. So `gpt-6-luna` is unknown.
+
+`models list` and `ModelRegistry.find` read `models.json`, which is why they see the model while the run does not.
+
+**Supported fix: a model-scoped runtime pin.** Pin each discovered model you want to run to the PI runtime:
+
+```json5
+{
+  agents: {
+    defaults: {
+      models: {
+        "openai-codex/gpt-6-luna": { agentRuntime: { id: "pi" } },
+      },
+    },
+  },
+}
+```
+
+- A per-agent pin in `agents.list[].models["<ref>"].agentRuntime` takes precedence over the defaults entry.
+- With the pin, the PI harness runs the turn. It generates and reads `models.json`, then calls the model on `openai-codex-responses` with the existing ChatGPT OAuth profile. This is the same transport discovery writes into each row.
+- Other `openai-codex/*` models keep their current harness. The `openai` provider, the default model and the OAuth profile are untouched.
+- An explicit `agentRuntime: { id: "codex" }` pin keeps the Codex harness.
+
+**Why default routing is unchanged.**
+
+- **Existing turns would move.** The VM's current `openai-codex` turns run on the Codex harness today, including the default model, Discord and the Codex app-server memory candidate queue. Changing the default would silently move all of them to PI.
+- **Codex support for GPT-6 is unverified.** The bundled Codex app-server is `@openai/codex` 0.130.0, while discovery uses upstream's `client_version=0.160.0`. Making the Codex harness read `models.json` would hand it ids it may not support, so that is not a safe alternative.
+- **A runner-only switch would drift.** `runAgentHarnessAttempt` re-selects the harness through policy on every attempt and ignores session pins. A reroute only in the runner would disagree with the attempt-level choice.
+- **The pin is already the documented opt-in.** A correct default change belongs in upstream-owned policy and needs its own review (section 11).
+
+**Code change.**
+
+- `src/agents/pi-embedded-runner/run/harness-model-resolution.ts` (new) holds the embedded runner's existing harness selection and model resolution step, extracted unchanged. `run.ts` calls it, so tests cover the production composition.
+- When a plugin harness cannot resolve a model, the error now names the fix:
+  ```
+  Unknown model: openai-codex/gpt-6-luna (agent runtime "codex" does not read models.json; if `models list` shows this model, set agentRuntime.id "pi" on agents.defaults.models["openai-codex/gpt-6-luna"] to run it through PI)
+  ```
+  Error consumers match `Unknown model` as a prefix or substring, so failover classification is unchanged.
+- Policy, harness selection, providers, transports, discovery and credentials are not changed.
+
+9. Test results (local, macOS, Node 22)
 
 | Suite | Result |
 | --- | --- |
@@ -136,6 +187,11 @@ Every `unavailable` line ends with "not live discovery, previously written and b
 | `src/plugins` provider discovery (runtime selection, synthetic auth, catalog) | 3 files, 23/23 passed |
 | `src/agents/models-config*.test.ts` (agents config), including the new `models.json` integration test | 17 of 19 files passed, 95 of 104 tests. 9 failures in 2 files predate this branch (below). |
 | `src/agents/models-config.openai-codex-discovery.test.ts` (new) | 7/7 passed |
+| `src/agents/pi-embedded-runner/run/harness-model-resolution.test.ts` (new, runtime resolution after discovery) | 4/4 passed |
+| `src/agents/harness/selection.test.ts`, including 5 new `openai-codex` runtime policy cases | 24/24 passed |
+| `src/agents/harness/*.test.ts` | 7 files, 109/109 passed |
+| Embedded runner `src/agents/pi-embedded-runner/run.*.test.ts`, including the Codex server-error fallback | 9 files, 167/167 passed |
+| Model resolution `src/agents/pi-embedded-runner/model*.test.ts`, including `skipPiDiscovery` hooks | 7 files, 114/114 passed |
 | CLI: `route-args`, `routes`, `models-cli` | 2 files, 46/46 passed |
 | Commands: `src/commands/models/list*.test.ts` | 12 files, 101/101 passed |
 | `test/vitest/vitest.contracts-plugin.config.ts` | 59 files, 781/781 passed |
@@ -156,6 +212,14 @@ Every `unavailable` line ends with "not live discovery, previously written and b
 
 Before the core fix, the same unscoped scenario made zero discovery requests.
 
+`src/agents/pi-embedded-runner/run/harness-model-resolution.test.ts` covers the step after discovery. It runs the helper that `run.ts` calls, with real harness selection, the real discovery-generated `models.json` and the real resolver. The GPT-6 Luna allowlist entry is `agents.defaults.models["openai-codex/gpt-6-luna"]`, and the Codex app-server harness is a registration stub with the same provider support. It proves:
+- without a pin, the run selects the `codex` harness and fails with `Unknown model: openai-codex/gpt-6-luna` plus the hint, which reproduces the VM failure;
+- with `agentRuntime: { id: "pi" }`, the run selects PI, generates `models.json` through normal discovery, and resolves `gpt-6-luna` on `openai-codex-responses` at the ChatGPT Codex base URL;
+- with `agentRuntime: { id: "codex" }`, the run stays on the `codex` harness;
+- with Luna pinned to PI, unpinned `gpt-5.4` stays on the `codex` harness and still resolves.
+
+`src/agents/harness/selection.test.ts` covers the same pins through `runAgentHarnessAttempt` and `selectAgentHarness`, which re-select on every attempt. It also covers a per-agent `agents.list[].models` pin.
+
 **Earlier failures in other tests.** `models-config.skips-writing-models-json-no-env-token.test.ts` (4 tests) and `models-config.uses-first-github-copilot-profile-env-tokens.test.ts` (5 tests) also fail at `ceabe7b8ea6`, the commit before this fix.
 - **Cause.** Each test replaces `./models-config.providers.js` with a `vi.mock` that lacks `normalizeProviderCatalogModelsForConfig`, which `models-config.plan.ts` imports.
 - **Scope.** This branch does not change those files, and fixing them is out of scope.
@@ -163,7 +227,7 @@ Before the core fix, the same unscoped scenario made zero discovery requests.
 The normal `pnpm test` runner fails in this sandbox: its automatic `pnpm install` cannot run the esbuild postinstall. The suites were run with the repo's Vitest configs directly (`node node_modules/vitest/vitest.mjs run --config <config> --maxWorkers=1 <files>`). The repo oxlint wrapper also fails here while preparing boundary artifacts, so `node_modules/.bin/oxlint` was run directly.
 
 **Not verified locally:**
-- live discovery against the account;
+- live discovery against the account. The second VM run confirmed it (section 8);
 - whether the backend accepts `gpt-5.6*` / `gpt-6*` on pi's `openai-codex-responses` transport;
 - whether `client_version=0.160.0` gates any rows. That value matches the `@openai/codex` version upstream bundles;
 - a real model call.
@@ -172,7 +236,7 @@ Upstream behavior to watch for on the VM:
 - Upstream notes that `gpt-6-astra` can be refused for ChatGPT-account Codex use on some paths, and falls back to `gpt-6-luna`. If Astra is listed but fails in step 6, prefer `gpt-6-sol` or `gpt-6-luna`.
 - Upstream hides `gpt-5.4` on ChatGPT hosts in favor of `gpt-5.6-terra`. This branch leaves `gpt-5.4` alone, because it passed the live probe.
 
-9. VM validation instructions
+10. VM validation instructions
 
 Run these on the VM from the fork checkout, as the user that runs OpenClaw. The VM runs the gateway from source with `pnpm gateway:watch`, and every CLI call goes through `pnpm openclaw`. Do not print or copy credential files.
 
@@ -205,13 +269,18 @@ Run these on the VM from the fork checkout, as the user that runs OpenClaw. The 
    ```bash
    pnpm openclaw models status --probe --probe-provider openai-codex
    ```
-6. Invoke each newly listed model. The ids below are examples; use the ones step 4 lists.
+6. Pin each newly listed model to the PI runtime (section 8), then invoke it. The ids below are examples; use the ones step 4 lists.
    ```bash
-   pnpm openclaw agent --local --model openai-codex/gpt-6-sol --message "Reply OK"
-   pnpm openclaw agent --local --model openai-codex/gpt-6-luna --message "Reply OK"
-   pnpm openclaw agent --local --model openai-codex/gpt-5.4 --message "Reply OK"
+   pnpm openclaw config set 'agents.defaults.models["openai-codex/gpt-6-luna"].agentRuntime.id' pi
+   pnpm openclaw agent --local --agent main --model openai-codex/gpt-6-luna --message "Reply OK"
    ```
-   - If config sets `agents.defaults.models` (a model allowlist), add the new refs there first, or `--model` rejects them.
+   - Add `--dry-run` to `config set` first to preview the change. Repeat the pin for each new model, such as `openai-codex/gpt-6-sol`.
+   - Without the pin, the run fails with `Unknown model: … (agent runtime "codex" does not read models.json; …)`. That is expected and confirms section 8.
+   - If config sets `agents.defaults.models` (a model allowlist), the new refs must be listed there, or `--model` rejects them. The `config set` above adds the entry when it is missing.
+   - Confirm an existing, unpinned model still runs on its current harness:
+     ```bash
+     pnpm openclaw agent --local --agent main --model openai-codex/gpt-5.4 --message "Reply OK"
+     ```
 7. Change the default model only when step 6 succeeds.
    - Example: set `agents.defaults.model.primary` to `openai-codex/gpt-6-sol`, then run `pnpm gateway:watch` again to restart.
    - If that model is not discovered, leave the current default as it is.
@@ -219,17 +288,20 @@ Run these on the VM from the fork checkout, as the user that runs OpenClaw. The 
 
 **If the model list does not change:** use the step 4 log line and section 7.
 - No line at all means discovery did not run. Report it with the command output.
-- A listed model that fails at invocation means the backend rejected it on pi's transport. Remove it from config and report the error.
+- `Unknown model` with the `agent runtime "codex"` hint means the model is not pinned to PI. Apply the step 6 pin.
+- A pinned, listed model that fails at invocation means the backend rejected it on pi's transport. Remove it from config and report the error.
 
 **Rollback:**
 1. Run `git checkout main`. Fork `main` is `2d6350c546`.
 2. Run `pnpm gateway:watch` to restart.
-3. Restore any changed `agents.defaults.model.primary`.
+3. Restore any changed `agents.defaults.model.primary`, and remove the step 6 pins with `pnpm openclaw config unset 'agents.defaults.models["<ref>"].agentRuntime'`.
 4. Optionally run `pnpm openclaw models list --refresh` to rewrite `models.json` without discovered rows.
 
 No credential rollback is needed, because the branch does not change auth storage.
 
-10. Open questions for review
+11. Open questions for review
+
+- Should account-discovered `openai-codex/*` models that the Codex app-server cannot resolve route to PI by default? This would be a policy change in `src/agents/harness/policy.ts`, and it needs to cover attempt-level re-selection. Today it requires an explicit pin (section 8).
 
 - Should a core catalog-filter seam hide pi-ai built-in Codex rows that the account does not list?
 - Should gateway startup run scoped live discovery for the configured primary provider? Today it stays entries-only, to keep readiness fast.

@@ -220,6 +220,93 @@ describe("runAgentHarnessAttempt", () => {
     expect(piRunAttempt).toHaveBeenCalledTimes(1);
   });
 
+  describe("openai-codex model runtime policy", () => {
+    // Allowlist entries as agents.defaults.models writes them, optionally pinned.
+    function openAICodexModelsConfig(entries: Record<string, "pi" | "codex" | undefined>) {
+      return {
+        agents: {
+          defaults: {
+            models: Object.fromEntries(
+              Object.entries(entries).map(([ref, runtime]) => [
+                ref,
+                runtime ? { agentRuntime: { id: runtime } } : {},
+              ]),
+            ),
+          },
+        },
+      } as OpenClawConfig;
+    }
+
+    function openAICodexAttempt(modelId: string, config: OpenClawConfig) {
+      return { ...createAttemptParams(config), provider: "openai-codex", modelId };
+    }
+
+    it("uses the Codex harness for allowed openai-codex models without a runtime pin", async () => {
+      registerSuccessfulCodexHarness();
+      const config = openAICodexModelsConfig({ "openai-codex/gpt-6-luna": undefined });
+
+      const result = await runAgentHarnessAttempt(openAICodexAttempt("gpt-6-luna", config));
+
+      expect(result.sessionIdUsed).toBe("codex");
+      expect(piRunAttempt).not.toHaveBeenCalled();
+    });
+
+    it("runs a model-scoped agentRuntime pi openai-codex model through PI", async () => {
+      registerSuccessfulCodexHarness();
+      const config = openAICodexModelsConfig({ "openai-codex/gpt-6-luna": "pi" });
+
+      const result = await runAgentHarnessAttempt(openAICodexAttempt("gpt-6-luna", config));
+
+      expect(result.sessionIdUsed).toBe("pi");
+      expect(piRunAttempt).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps other openai-codex models on Codex when one model is pinned to PI", async () => {
+      registerSuccessfulCodexHarness();
+      const config = openAICodexModelsConfig({
+        "openai-codex/gpt-6-luna": "pi",
+        "openai-codex/gpt-5.4": undefined,
+      });
+
+      expect(selectAgentHarness({ provider: "openai-codex", modelId: "gpt-5.4", config }).id).toBe(
+        "codex",
+      );
+      expect(
+        selectAgentHarness({ provider: "openai-codex", modelId: "gpt-6-luna", config }).id,
+      ).toBe("pi");
+    });
+
+    it("keeps a model-scoped agentRuntime codex pin on the Codex harness", async () => {
+      registerSuccessfulCodexHarness();
+      const config = openAICodexModelsConfig({ "openai-codex/gpt-6-luna": "codex" });
+
+      const result = await runAgentHarnessAttempt(openAICodexAttempt("gpt-6-luna", config));
+
+      expect(result.sessionIdUsed).toBe("codex");
+      expect(piRunAttempt).not.toHaveBeenCalled();
+    });
+
+    it("honors a per-agent model runtime pin for openai-codex", () => {
+      registerSuccessfulCodexHarness();
+      const config = {
+        agents: {
+          list: [
+            { id: "main", models: { "openai-codex/gpt-6-luna": { agentRuntime: { id: "pi" } } } },
+          ],
+        },
+      } as OpenClawConfig;
+
+      expect(
+        selectAgentHarness({
+          provider: "openai-codex",
+          modelId: "gpt-6-luna",
+          config,
+          agentId: "main",
+        }).id,
+      ).toBe("pi");
+    });
+  });
+
   it("annotates non-ok harness result classifications for outer model fallback", async () => {
     const classify = vi.fn<NonNullable<AgentHarness["classify"]>>(() => "empty" as const);
     registerAgentHarness(
